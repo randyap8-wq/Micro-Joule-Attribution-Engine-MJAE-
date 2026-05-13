@@ -231,10 +231,18 @@ mod tests {
         // in `add_micro_joules`. With the buggy implementation, two threads
         // racing on a never-before-seen PID would each `insert` a fresh
         // zero slot — the second insert silently overwriting the first —
-        // and one thread's delta would be lost. After the fix both threads
-        // re-fetch the post-insert entry and accumulate onto the same slot.
+        // and the delta the first thread accumulated onto its
+        // now-orphaned entry would be lost. After the fix both threads
+        // accumulate onto the same `get_or_insert`-returned canonical slot,
+        // and no delta can be dropped.
+        //
+        // The per-PID and total assertions are what actually catch the
+        // regression: each thread's local `add_micro_joules` return value
+        // would still be >= 1 under the buggy path (it always at least
+        // adds 1 onto the AtomicU64 it just installed before that
+        // AtomicU64 is later overwritten by a racer), so only the
+        // post-hoc registry totals can prove no delta was lost.
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
         use std::thread;
 
         const THREADS: usize = 16;
@@ -242,23 +250,18 @@ mod tests {
 
         let registry = Arc::new(AmalgafyRegistry::new());
         let barrier = Arc::new(std::sync::Barrier::new(THREADS));
-        let losers = Arc::new(AtomicUsize::new(0));
 
         let mut handles = Vec::with_capacity(THREADS);
         for _ in 0..THREADS {
             let registry = Arc::clone(&registry);
             let barrier = Arc::clone(&barrier);
-            let losers = Arc::clone(&losers);
             handles.push(thread::spawn(move || {
                 for i in 0..ITERATIONS {
                     // Use a fresh, never-before-seen PID per iteration so
                     // every increment hits the cold-path race window.
                     let pid = (i as u32) * 1_000 + 1;
                     barrier.wait();
-                    let new_total = registry.add_micro_joules(pid, 1);
-                    if new_total == 0 {
-                        losers.fetch_add(1, AtomicOrdering::Relaxed);
-                    }
+                    registry.add_micro_joules(pid, 1);
                 }
             }));
         }
@@ -266,12 +269,8 @@ mod tests {
             h.join().expect("worker should not panic");
         }
 
-        // Every observed return must be at least 1 — if a thread's delta
-        // was dropped by an overwriting insert, it would observe 0.
-        assert_eq!(losers.load(AtomicOrdering::Relaxed), 0);
-
-        // And the per-PID totals must sum exactly to THREADS*ITERATIONS:
-        // no delta may be dropped during the cold-path race.
+        // The per-PID totals must sum exactly to THREADS*ITERATIONS: no
+        // delta may be dropped during the cold-path race.
         assert_eq!(
             registry.total_micro_joules(),
             (THREADS * ITERATIONS) as u64
