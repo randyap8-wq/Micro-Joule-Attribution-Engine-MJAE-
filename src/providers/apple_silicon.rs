@@ -92,9 +92,17 @@ impl EnergyProvider for AppleSiliconProvider {
         window_end_ns: u64,
         snapshot: &PowerSnapshot,
     ) -> Result<PidEnergyAttribution> {
-        let mut attribution =
+        let attribution =
             PidEnergyAttribution::baseline_burst(pid, window_start_ns, window_end_ns, snapshot);
-        attribution.hardware_signature = self.hardware_signature.clone();
+
+        if snapshot.hardware_signature != self.hardware_signature {
+            bail!(
+                "AppleSiliconProvider received a PowerSnapshot for different hardware (snapshot: {}, provider: {})",
+                snapshot.hardware_signature,
+                self.hardware_signature
+            );
+        }
+
         Ok(attribution)
     }
 }
