@@ -85,10 +85,23 @@ impl HardwareIdentity {
     /// Construct a synthetic placeholder identity. Use this only when every
     /// real probe has failed — auditors are expected to flag any seal whose
     /// `source == Synthetic`.
+    ///
+    /// The returned fingerprint embeds a host- and process-specific
+    /// component so two distinct hosts (or two daemons on the same host)
+    /// that both fall back to synthetic still produce different identities;
+    /// this preserves the per-host binding contract even when no real
+    /// kernel/firmware source is available.
     #[must_use]
     pub fn synthetic(reason: impl Into<String>) -> Self {
+        let host = std::env::var("HOSTNAME")
+            .or_else(|_| std::env::var("COMPUTERNAME"))
+            .or_else(|_| std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_owned()))
+            .unwrap_or_else(|_| "unknown-host".to_owned());
+        let host = host.trim();
+        let host = if host.is_empty() { "unknown-host" } else { host };
+        let pid = std::process::id();
         Self {
-            fingerprint: format!("synthetic:{}", reason.into()),
+            fingerprint: format!("synthetic:{}:host={}:pid={}", reason.into(), host, pid),
             source: HardwareIdentitySource::Synthetic,
         }
     }

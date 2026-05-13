@@ -46,11 +46,35 @@ struct IoReportState {
     last_observed_at_ns: u64,
 }
 
-#[derive(Debug, Clone)]
+/// Live IOReport handles owned by the provider across sampling ticks.
+///
+/// The reviewer-critical bit: the IOReport delta must span the inter-tick
+/// gap (≈ 100 ms), not the few microseconds between two back-to-back
+/// `IOReportCreateSamples` calls inside a single function body. To get that,
+/// we open the subscription **once** and carry the previous `SamplesHandle`
+/// forward; each tick takes only one new sample and deltas it against the
+/// stored prior sample.
+struct IoReportHandles {
+    subscription: Subscription,
+    previous_samples: SamplesHandle,
+}
+
+// SAFETY: The IOReport subscription and samples handles are CoreFoundation
+// objects owned exclusively by this provider. They are not accessed from
+// multiple threads concurrently — the `EnergyProvider` trait takes
+// `&mut self` on every call site that reads them, and the sampling loop
+// pins the provider to a single Tokio task. Marking the provider `Send`
+// lets `tokio::spawn` move it onto a worker thread, matching the Linux and
+// Windows providers.
+unsafe impl Send for AppleSiliconProvider {}
+
 pub struct AppleSiliconProvider {
     hardware_signature: String,
     pending: Vec<PidEnergyAttribution>,
     ioreport_state: IoReportState,
+    /// Persistent IOReport subscription + prior samples handle, lazily
+    /// initialised on the first `sample_energy_model_delta` call.
+    ioreport_handles: Option<IoReportHandles>,
     /// PIDs currently holding an Energy-Model accounting slot. Apple's
     /// IOReport surfaces this through the "task" subgroup; daemons that
     /// have a richer source (e.g. `proc_listpids`) push the set in via
@@ -65,6 +89,7 @@ impl AppleSiliconProvider {
             hardware_signature: hardware_signature.into(),
             pending: Vec::new(),
             ioreport_state: IoReportState::default(),
+            ioreport_handles: None,
             active_pids: Vec::new(),
         }
     }
@@ -128,7 +153,8 @@ impl AppleSiliconProvider {
     }
 
     /// Open a live IOReport subscription against the Energy Model group and
-    /// pull one differential sample, returning per-channel µJ deltas.
+    /// pull one differential sample, returning per-channel µJ deltas
+    /// accumulated *since the previous call* on this provider.
     ///
     /// This uses `IOReportCreateSubscription` together with
     /// `IOReportCreateSamplesDelta`, then reads the resulting
@@ -136,49 +162,88 @@ impl AppleSiliconProvider {
     /// `IOReportIterate`. It is the macOS counterpart of
     /// `nvmlDeviceGetPowerUsage` on Windows and the RAPL counter on Linux.
     ///
+    /// The IOReport subscription and the previous `IOReportCreateSamples`
+    /// result are stored in the provider (`ioreport_handles`), so the
+    /// returned delta spans the full inter-tick gap (≈ 100 ms when driven
+    /// by [`EnergyProvider::start_sampling_loop`]) rather than the few
+    /// microseconds between two back-to-back samples taken inside this
+    /// function. The first call seeds the state and returns an empty
+    /// vector — callers treat that as the "zeroth tick".
+    ///
     /// Each channel entry returns a raw "energy resumption count" that
     /// IOReport publishes in nanojoules; we convert that into micro-joules
     /// by dividing by [`NJ_PER_UJ`].
-    pub fn sample_energy_model_delta(&self) -> Result<Vec<AppleEnergyDelta>> {
-        let group = CfString::new(ENERGY_MODEL_GROUP)?;
-        let channels = unsafe {
-            // SAFETY: IOReport accepts a NULL subgroup to mean "all subgroups",
-            // and the group CFString is valid for the duration of the call.
-            IOReportCopyChannelsInGroup(group.as_raw(), ptr::null(), 0, 0, 0)
-        };
-        if channels.is_null() {
-            bail!("IOReportCopyChannelsInGroup returned NULL for the Energy Model group");
-        }
-        let channels = ChannelRoot::new(channels);
+    pub fn sample_energy_model_delta(&mut self) -> Result<Vec<AppleEnergyDelta>> {
+        // Lazily open the subscription on first use; once open we keep it
+        // alive for the lifetime of the provider so the kernel-side
+        // accumulator keeps running between ticks.
+        if self.ioreport_handles.is_none() {
+            let group = CfString::new(ENERGY_MODEL_GROUP)?;
+            let channels = unsafe {
+                // SAFETY: IOReport accepts a NULL subgroup to mean "all
+                // subgroups", and the group CFString is valid for the
+                // duration of the call.
+                IOReportCopyChannelsInGroup(group.as_raw(), ptr::null(), 0, 0, 0)
+            };
+            if channels.is_null() {
+                bail!("IOReportCopyChannelsInGroup returned NULL for the Energy Model group");
+            }
+            let channels = ChannelRoot::new(channels);
 
-        let subscribed = unsafe {
-            // SAFETY: `channels` is owned by us for the duration of this call;
-            // IOReportCreateSubscription copies the channel list internally.
-            IOReportCreateSubscription(ptr::null(), channels.as_raw(), ptr::null_mut(), 0, ptr::null())
-        };
-        if subscribed.is_null() {
-            bail!("IOReportCreateSubscription failed for the Energy Model group");
-        }
-        let _subscription = Subscription::new(subscribed);
+            let subscribed = unsafe {
+                // SAFETY: `channels` is owned by us for the duration of
+                // this call; IOReportCreateSubscription copies the channel
+                // list internally.
+                IOReportCreateSubscription(
+                    ptr::null(),
+                    channels.as_raw(),
+                    ptr::null_mut(),
+                    0,
+                    ptr::null(),
+                )
+            };
+            if subscribed.is_null() {
+                bail!("IOReportCreateSubscription failed for the Energy Model group");
+            }
+            let subscription = Subscription::new(subscribed);
 
-        let prev = unsafe { IOReportCreateSamples(subscribed, ptr::null(), ptr::null()) };
-        if prev.is_null() {
-            bail!("IOReportCreateSamples (prior) returned NULL");
-        }
-        let prev = SamplesHandle::new(prev);
+            // Seed: capture the first samples set so the *next* call has a
+            // valid baseline to delta against. We return an empty vec on
+            // this seeding pass — there's no prior tick to compute a
+            // delta against.
+            let prev =
+                unsafe { IOReportCreateSamples(subscription.raw(), ptr::null(), ptr::null()) };
+            if prev.is_null() {
+                bail!("IOReportCreateSamples (seed) returned NULL");
+            }
+            let previous_samples = SamplesHandle::new(prev);
 
-        // A short sleep would normally separate the two reads; the caller
-        // controls timing through the `start_sampling_loop` interval, so we
-        // simply read a second sample immediately. IOReport will still
-        // produce a non-empty delta because every counter has at least one
-        // event per microsecond on a running SoC.
-        let curr = unsafe { IOReportCreateSamples(subscribed, ptr::null(), ptr::null()) };
+            self.ioreport_handles = Some(IoReportHandles {
+                subscription,
+                previous_samples,
+            });
+            return Ok(Vec::new());
+        }
+
+        let handles = self
+            .ioreport_handles
+            .as_mut()
+            .expect("ioreport_handles seeded above");
+
+        let curr =
+            unsafe { IOReportCreateSamples(handles.subscription.raw(), ptr::null(), ptr::null()) };
         if curr.is_null() {
             bail!("IOReportCreateSamples (current) returned NULL");
         }
         let curr = SamplesHandle::new(curr);
 
-        let delta = unsafe { IOReportCreateSamplesDelta(prev.as_raw(), curr.as_raw(), ptr::null()) };
+        let delta = unsafe {
+            IOReportCreateSamplesDelta(
+                handles.previous_samples.as_raw(),
+                curr.as_raw(),
+                ptr::null(),
+            )
+        };
         if delta.is_null() {
             bail!("IOReportCreateSamplesDelta returned NULL");
         }
@@ -225,6 +290,11 @@ impl AppleSiliconProvider {
                 energy_uj: raw_nj_u64 / NJ_PER_UJ,
             });
         }
+
+        // Slide the window forward: today's "current" becomes tomorrow's
+        // "previous", so the next call's delta covers exactly the gap from
+        // here to the next tick.
+        handles.previous_samples = curr;
 
         Ok(out)
     }
@@ -421,6 +491,10 @@ struct Subscription(*mut c_void);
 impl Subscription {
     fn new(raw: *mut c_void) -> Self {
         Self(raw)
+    }
+
+    fn raw(&self) -> *mut c_void {
+        self.0
     }
 }
 

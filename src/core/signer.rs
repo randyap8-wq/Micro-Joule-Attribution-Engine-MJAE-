@@ -114,21 +114,9 @@ impl AmalgafySigner {
         self.signing_key.verifying_key()
     }
 
-    /// Produce a signed seal over `attributions`, the `hardware_serial`, and
-    /// the precomputed `total_micro_joules`.
-    ///
-    /// This is the "Amalgafy Seal" referenced in the design directive. The
-    /// signature explicitly covers the hardware serial and the total joules so
-    /// an attacker cannot swap a high-energy payload for a different machine
-    /// or zero out the total without invalidating the signature.
-    ///
-    /// Determinism: `attributions` is sorted by `(pid, window_start_ns,
-    /// window_end_ns)` before being canonicalized, so two daemons observing
-    /// the same logical state produce byte-identical canonical payloads (and
-    /// therefore byte-identical signatures) regardless of the order in which
-    /// the caller assembled the input.
-    /// Produce a signed seal over `attributions`, the `hardware_serial`, and
-    /// the precomputed `total_micro_joules`.
+    /// Produce a signed seal over `attributions`, the `hardware_serial`, the
+    /// `hardware_identity` fingerprint, and the precomputed
+    /// `total_micro_joules`.
     ///
     /// This is the "Amalgafy Seal" referenced in the design directive. The
     /// signature explicitly covers the hardware serial, the

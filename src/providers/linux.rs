@@ -1,7 +1,7 @@
 #[cfg(target_os = "linux")]
 use std::marker::PhantomData;
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -48,10 +48,13 @@ pub struct DmaFenceEvent {
 pub struct LinuxProvider {
     hardware_signature: String,
     pending: Vec<PidEnergyAttribution>,
-    /// Submitter PIDs currently holding an in-flight `dma_fence`. Surfaced
-    /// to the differential sampling loop as the "accelerator-active" set so
-    /// the 100 ms Δ energy is split across the right PIDs.
-    active_pids: BTreeSet<u32>,
+    /// Submitter PIDs currently holding one or more in-flight `dma_fence`s
+    /// mapped to the count of fences still outstanding for each PID.
+    /// Surfaced to the differential sampling loop as the
+    /// "accelerator-active" set so the 100 ms Δ energy is split across
+    /// the right PIDs. We track a *count* (not just presence) so a
+    /// completed fence doesn't prematurely mark a still-busy PID idle.
+    active_pids: BTreeMap<u32, u32>,
     /// Most recent RAPL `energy_uj` reading, used to compute power between
     /// successive `sample_power_state` calls.
     rapl_state: Option<RaplState>,
@@ -63,6 +66,11 @@ pub struct LinuxProvider {
 struct RaplState {
     energy_uj: u64,
     observed_at_ns: u64,
+    /// Wrap point of the underlying counter, cached from
+    /// `max_energy_range_uj` on the first successful read. RAPL counters
+    /// reset to 0 when they exceed this value, so the delta between
+    /// successive reads must be computed modulo `max_energy_range_uj + 1`.
+    max_energy_uj: u64,
 }
 
 impl LinuxProvider {
@@ -73,13 +81,20 @@ impl LinuxProvider {
     /// unavailable on some systems (for example, AMD hosts, containers, or
     /// systems with restricted powercap access).
     pub const DEFAULT_RAPL_ENERGY_PATH: &str = "/sys/class/powercap/intel-rapl:0/energy_uj";
+    /// Sibling sysfs file that reports the wrap point of
+    /// [`Self::DEFAULT_RAPL_ENERGY_PATH`]. RAPL exposes a monotonically
+    /// increasing µJ counter that resets to 0 when it exceeds this value,
+    /// so a long-running daemon must subtract modulo `max_energy_range_uj`
+    /// to avoid losing an entire wrap interval.
+    pub const DEFAULT_RAPL_MAX_RANGE_PATH: &str =
+        "/sys/class/powercap/intel-rapl:0/max_energy_range_uj";
 
     #[must_use]
     pub fn new(hardware_signature: impl Into<String>) -> Self {
         Self {
             hardware_signature: hardware_signature.into(),
             pending: Vec::new(),
-            active_pids: BTreeSet::new(),
+            active_pids: BTreeMap::new(),
             rapl_state: None,
             #[cfg(target_os = "linux")]
             tracepoint_marker: PhantomData,
@@ -102,22 +117,30 @@ impl LinuxProvider {
         &self.pending
     }
 
-    /// Mark a PID as currently holding an in-flight `dma_fence`. Called from
-    /// the `dma_fence_init` eBPF callback to populate the active set the
-    /// differential sampling loop reads from.
+    /// Mark a PID as having submitted one more in-flight `dma_fence`.
+    /// Called from the `dma_fence_init` eBPF callback to populate the
+    /// active set the differential sampling loop reads from. Multiple
+    /// concurrent fences from the same submitter are tracked as an
+    /// in-flight *count*, not just presence, so a single signaled fence
+    /// cannot prematurely mark a still-busy PID idle.
     pub fn mark_pid_active(&mut self, pid: u32) {
-        self.active_pids.insert(pid);
+        let entry = self.active_pids.entry(pid).or_insert(0);
+        *entry = entry.saturating_add(1);
     }
 
-    /// Mark a PID as no longer holding any in-flight `dma_fence`.
+    /// Mark a PID as no longer holding any in-flight `dma_fence`. This is
+    /// the "force-remove" path used when a process exits or the daemon
+    /// otherwise knows the PID is gone; it clears the in-flight count
+    /// regardless of value.
     pub fn mark_pid_idle(&mut self, pid: u32) {
         self.active_pids.remove(&pid);
     }
 
-    /// Currently-active PIDs (submitters with in-flight `dma_fence`s).
+    /// Currently-active PIDs (submitters with one or more in-flight
+    /// `dma_fence`s).
     #[must_use]
     pub fn active_pid_set(&self) -> Vec<u32> {
-        self.active_pids.iter().copied().collect()
+        self.active_pids.keys().copied().collect()
     }
 
     /// Correlate a `dma_fence_signaled` event with GPU power data and
@@ -129,6 +152,11 @@ impl LinuxProvider {
     ///
     /// Energy math: `E = P_gpu × (t_signal − t_submit)`, using the
     /// `window_energy_uj` helper so we keep u64-only arithmetic.
+    ///
+    /// On the in-flight set: we decrement the submitter's fence count by
+    /// one (since this signaled fence is now complete). Only when the
+    /// count reaches zero does the PID drop out of `active_pid_set` — a
+    /// PID with other still-in-flight fences correctly stays "busy".
     pub fn correlate_fence(&mut self, event: DmaFenceEvent) -> PidEnergyAttribution {
         let window_ns = event.signaled_at_ns.saturating_sub(event.submitted_at_ns);
         let attributed_energy_uj = window_energy_uj(event.gpu_power_uw, window_ns);
@@ -140,10 +168,12 @@ impl LinuxProvider {
             attributed_energy_uj,
             hardware_signature: self.hardware_signature.clone(),
         };
-        // Do not remove the PID from `active_pids` on every `_signaled`
-        // event. A presence-only set cannot distinguish one completed fence
-        // from "no fences left", so unconditional removal can incorrectly
-        // mark a still-busy PID idle when it has other in-flight fences.
+        if let Some(count) = self.active_pids.get_mut(&event.submitter_pid) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.active_pids.remove(&event.submitter_pid);
+            }
+        }
         self.pending.push(attribution.clone());
         attribution
     }
@@ -151,6 +181,11 @@ impl LinuxProvider {
     /// Read the cumulative RAPL energy counter (in µJ) for the package and
     /// derive an instantaneous power reading by differencing against the
     /// previous read. The first call seeds the state and returns 0 power.
+    ///
+    /// RAPL counters wrap when they exceed `max_energy_range_uj`, so the
+    /// delta is computed modulo that wrap point (`(curr − prev) mod
+    /// (max + 1)`) — a plain `saturating_sub` would silently drop an
+    /// entire wrap interval on long-running daemons.
     fn read_rapl_power_uw(&mut self) -> Result<(u64, u64)> {
         let raw = fs::read_to_string(Self::DEFAULT_RAPL_ENERGY_PATH)?;
         let energy_uj: u64 = raw.trim().parse()?;
@@ -162,8 +197,29 @@ impl LinuxProvider {
         )
         .unwrap_or(0);
 
+        // `max_energy_range_uj` is a small read that only changes when the
+        // kernel module is reloaded; cache it after the first successful
+        // read and fall back to u64::MAX (i.e. effectively non-wrapping)
+        // if the sibling file is missing.
+        let max_energy_uj = if let Some(prev) = self.rapl_state {
+            prev.max_energy_uj
+        } else {
+            fs::read_to_string(Self::DEFAULT_RAPL_MAX_RANGE_PATH)
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(u64::MAX)
+        };
+
         let power_uw = if let Some(prev) = self.rapl_state {
-            let delta_uj = energy_uj.saturating_sub(prev.energy_uj);
+            // Modular delta: handle the RAPL counter wrapping back to 0
+            // once it exceeds `max_energy_uj`.
+            let delta_uj = if energy_uj >= prev.energy_uj {
+                energy_uj - prev.energy_uj
+            } else {
+                // Counter wrapped: (max - prev) + curr + 1.
+                let to_wrap = max_energy_uj.saturating_sub(prev.energy_uj);
+                to_wrap.saturating_add(energy_uj).saturating_add(1)
+            };
             let dt_ns = observed_at_ns.saturating_sub(prev.observed_at_ns);
             if dt_ns == 0 {
                 0
@@ -179,6 +235,7 @@ impl LinuxProvider {
         self.rapl_state = Some(RaplState {
             energy_uj,
             observed_at_ns,
+            max_energy_uj,
         });
         Ok((power_uw, observed_at_ns))
     }

@@ -287,7 +287,7 @@ mod tests {
         assert_eq!(SAMPLING_LOOP_INTERVAL_MS, 100);
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn sampling_loop_accumulates_delta_into_active_pids() {
         let registry = Arc::new(AmalgafyRegistry::new());
         let mut provider = FakeProvider::new(vec![100, 200]);
@@ -297,14 +297,23 @@ mod tests {
             let _ = provider.start_sampling_loop(&reg_handle).await;
         });
 
-        // ~5 real-time ticks (100 ms each) → ≥3 Δ intervals attributed.
-        tokio::time::sleep(std::time::Duration::from_millis(550)).await;
+        // Deterministically advance virtual time by ~5 tick periods. With
+        // `start_paused = true` Tokio's clock only moves when we tell it
+        // to, so this is independent of CI load — the spawned task is
+        // scheduled and wakes precisely on each simulated 100 ms boundary.
+        for _ in 0..5 {
+            tokio::time::advance(std::time::Duration::from_millis(
+                SAMPLING_LOOP_INTERVAL_MS,
+            ))
+            .await;
+            tokio::task::yield_now().await;
+        }
         handle.abort();
 
-        // 1 W burst × 100 ms = 100_000 µJ per interval. With 3-5 intervals
-        // we expect 300_000 µJ ≤ total ≤ 500_000 µJ, split between PID 100
-        // and PID 200. We intentionally allow a wide band so this is not
-        // a flaky test on a loaded CI host.
+        // 1 W burst × 100 ms = 100_000 µJ per interval. With 4 Δ intervals
+        // following the seed tick we expect 400_000 µJ split across PID
+        // 100 and PID 200. Use a small floor that survives any single
+        // missed wake-up, but no upper bound dependency on wall time.
         let total = registry.total_micro_joules();
         assert!(
             total >= 200_000,
@@ -317,7 +326,7 @@ mod tests {
         assert_eq!(registry.get(0), None);
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn sampling_loop_buckets_to_pid_zero_when_no_active_pids() {
         let registry = Arc::new(AmalgafyRegistry::new());
         let mut provider = FakeProvider::new(Vec::new());
@@ -327,7 +336,13 @@ mod tests {
             let _ = provider.start_sampling_loop(&reg_handle).await;
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        for _ in 0..3 {
+            tokio::time::advance(std::time::Duration::from_millis(
+                SAMPLING_LOOP_INTERVAL_MS,
+            ))
+            .await;
+            tokio::task::yield_now().await;
+        }
         handle.abort();
 
         // With no active PIDs the loop is required to bucket Δ under PID 0
