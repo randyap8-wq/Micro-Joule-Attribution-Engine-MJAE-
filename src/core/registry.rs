@@ -245,7 +245,7 @@ mod tests {
         let losers = Arc::new(AtomicUsize::new(0));
 
         let mut handles = Vec::with_capacity(THREADS);
-        for t in 0..THREADS {
+        for _ in 0..THREADS {
             let registry = Arc::clone(&registry);
             let barrier = Arc::clone(&barrier);
             let losers = Arc::clone(&losers);
@@ -259,8 +259,6 @@ mod tests {
                     if new_total == 0 {
                         losers.fetch_add(1, AtomicOrdering::Relaxed);
                     }
-                    // Avoid all threads using exactly the same `i` next.
-                    let _ = t;
                 }
             }));
         }
