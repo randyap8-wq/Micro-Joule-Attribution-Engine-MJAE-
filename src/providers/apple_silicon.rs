@@ -4,8 +4,9 @@ use std::ffi::{CStr, CString, c_void};
 use std::ptr;
 
 use anyhow::{Result, anyhow, bail};
+use log::debug;
 
-use crate::core::{EnergyProvider, PidEnergyAttribution, PowerSnapshot};
+use crate::core::{AmalgafyRegistry, EnergyProvider, PidEnergyAttribution, PowerSnapshot};
 
 const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
 const IOREPORT_CHANNELS_KEY: &str = "IOReportChannels";
@@ -22,6 +23,7 @@ pub struct AppleEnergyChannel {
 #[derive(Debug, Clone)]
 pub struct AppleSiliconProvider {
     hardware_signature: String,
+    pending: Vec<PidEnergyAttribution>,
 }
 
 impl AppleSiliconProvider {
@@ -29,7 +31,15 @@ impl AppleSiliconProvider {
     pub fn new(hardware_signature: impl Into<String>) -> Self {
         Self {
             hardware_signature: hardware_signature.into(),
+            pending: Vec::new(),
         }
+    }
+
+    /// Enqueue an attribution derived from an IOReport sample so that the
+    /// next [`EnergyProvider::sync_registry`] call propagates it into the
+    /// global [`AmalgafyRegistry`].
+    pub fn enqueue_attribution(&mut self, attribution: PidEnergyAttribution) {
+        self.pending.push(attribution);
     }
 
     pub fn discover_gpu_ane_channels(&self) -> Result<Vec<AppleEnergyChannel>> {
@@ -104,6 +114,23 @@ impl EnergyProvider for AppleSiliconProvider {
         }
 
         Ok(attribution)
+    }
+
+    fn sync_registry(&mut self, registry: &AmalgafyRegistry) -> Result<u64> {
+        let mut total: u64 = 0;
+        for attribution in self.pending.drain(..) {
+            registry.add_micro_joules(attribution.pid, attribution.attributed_energy_uj);
+            total = total.saturating_add(attribution.attributed_energy_uj);
+        }
+        debug!(
+            "AppleSiliconProvider::sync_registry pushed {total} µJ for hardware {}",
+            self.hardware_signature
+        );
+        Ok(total)
+    }
+
+    fn hardware_signature(&self) -> &str {
+        &self.hardware_signature
     }
 }
 
