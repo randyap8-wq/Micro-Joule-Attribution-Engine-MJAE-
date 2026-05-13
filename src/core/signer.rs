@@ -14,6 +14,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::core::hardware::HardwareIdentity;
 use crate::core::provider::PidEnergyAttribution;
 
 /// The cadence at which the daemon is required to publish a fresh
@@ -30,6 +31,12 @@ pub const AMALGAFY_SEAL_INTERVAL_SECS: u64 = 60;
 pub struct AmalgafySealPayload {
     pub manifest_version: u32,
     pub hardware_serial: String,
+    /// Cryptographically locked hardware fingerprint, as produced by
+    /// [`HardwareIdentity::probe`](crate::core::hardware::HardwareIdentity::probe).
+    /// This is what defeats "Audit Spoofing": the signature is bound to the
+    /// physical machine, so a manifest from host A cannot be replayed as if
+    /// it came from host B even if both daemons share the same signing key.
+    pub hardware_identity: HardwareIdentity,
     pub sealed_at_unix_ns: u64,
     pub total_micro_joules: u64,
     pub attributions: Vec<PidEnergyAttribution>,
@@ -120,11 +127,30 @@ impl AmalgafySigner {
     /// the same logical state produce byte-identical canonical payloads (and
     /// therefore byte-identical signatures) regardless of the order in which
     /// the caller assembled the input.
+    /// Produce a signed seal over `attributions`, the `hardware_serial`, and
+    /// the precomputed `total_micro_joules`.
+    ///
+    /// This is the "Amalgafy Seal" referenced in the design directive. The
+    /// signature explicitly covers the hardware serial, the
+    /// [`HardwareIdentity`] fingerprint, and the total joules so an attacker
+    /// cannot swap a high-energy payload for a different machine or zero out
+    /// the total without invalidating the signature.
+    ///
+    /// `hardware_identity` is the value returned by
+    /// [`HardwareIdentity::probe`](crate::core::hardware::HardwareIdentity::probe).
+    /// Daemons should call `probe()` once at startup and reuse the result.
+    ///
+    /// Determinism: `attributions` is sorted by `(pid, window_start_ns,
+    /// window_end_ns)` before being canonicalized, so two daemons observing
+    /// the same logical state produce byte-identical canonical payloads (and
+    /// therefore byte-identical signatures) regardless of the order in which
+    /// the caller assembled the input.
     pub fn seal(
         &self,
         mut attributions: Vec<PidEnergyAttribution>,
         hardware_serial: impl Into<String>,
         total_micro_joules: u64,
+        hardware_identity: HardwareIdentity,
     ) -> Result<AmalgafySeal> {
         let sealed_at_unix_ns = u64::try_from(
             SystemTime::now()
@@ -147,6 +173,7 @@ impl AmalgafySigner {
         let payload = AmalgafySealPayload {
             manifest_version: self.manifest_version,
             hardware_serial: hardware_serial.into(),
+            hardware_identity,
             sealed_at_unix_ns,
             total_micro_joules,
             attributions,
@@ -201,6 +228,7 @@ fn canonicalize_value(value: Value) -> Value {
 mod tests {
     use ed25519_dalek::{SECRET_KEY_LENGTH, SigningKey};
 
+    use crate::core::hardware::HardwareIdentity;
     use crate::core::provider::PidEnergyAttribution;
 
     use super::{AmalgafySigner, canonical_json};
@@ -226,16 +254,26 @@ mod tests {
         ]
     }
 
+    fn fixture_identity() -> HardwareIdentity {
+        HardwareIdentity::manual("NV-H100-SXM5-SN-0001")
+    }
+
     #[test]
     fn signer_produces_a_verifiable_seal() {
         let signer = AmalgafySigner::new(SigningKey::from_bytes(&[3_u8; SECRET_KEY_LENGTH]));
         let seal = signer
-            .seal(fixture_attributions(), "NV-H100-SXM5-SN-0001", 650)
+            .seal(
+                fixture_attributions(),
+                "NV-H100-SXM5-SN-0001",
+                650,
+                fixture_identity(),
+            )
             .expect("seal should sign");
 
         seal.verify().expect("seal should verify");
         assert_eq!(seal.payload.total_micro_joules, 650);
         assert_eq!(seal.payload.hardware_serial, "NV-H100-SXM5-SN-0001");
+        assert_eq!(seal.payload.hardware_identity, fixture_identity());
         assert_eq!(seal.payload.attributions.len(), 2);
         assert_eq!(seal.signature.len(), 64);
     }
@@ -244,7 +282,7 @@ mod tests {
     fn seal_verification_fails_after_tampering_with_total_joules() {
         let signer = AmalgafySigner::new(SigningKey::from_bytes(&[5_u8; SECRET_KEY_LENGTH]));
         let mut seal = signer
-            .seal(fixture_attributions(), "NV-H100", 650)
+            .seal(fixture_attributions(), "NV-H100", 650, fixture_identity())
             .expect("seal should sign");
 
         seal.payload.total_micro_joules = 1;
@@ -256,12 +294,27 @@ mod tests {
     fn seal_verification_fails_after_swapping_hardware_serial() {
         let signer = AmalgafySigner::new(SigningKey::from_bytes(&[6_u8; SECRET_KEY_LENGTH]));
         let mut seal = signer
-            .seal(fixture_attributions(), "NV-H100", 650)
+            .seal(fixture_attributions(), "NV-H100", 650, fixture_identity())
             .expect("seal should sign");
 
         seal.payload.hardware_serial = "WRONG-SERIAL".to_owned();
 
         assert!(seal.verify().is_err());
+    }
+
+    #[test]
+    fn seal_verification_fails_after_swapping_hardware_identity() {
+        let signer = AmalgafySigner::new(SigningKey::from_bytes(&[6_u8; SECRET_KEY_LENGTH]));
+        let mut seal = signer
+            .seal(fixture_attributions(), "NV-H100", 650, fixture_identity())
+            .expect("seal should sign");
+
+        seal.payload.hardware_identity = HardwareIdentity::manual("OTHER-MACHINE");
+
+        assert!(
+            seal.verify().is_err(),
+            "swapping the bound hardware identity must invalidate the signature"
+        );
     }
 
     #[test]
@@ -273,31 +326,23 @@ mod tests {
         reversed.reverse();
 
         let seal_a = signer
-            .seal(forward, "NV-H100-SXM5-SN-0001", 650)
+            .seal(
+                forward,
+                "NV-H100-SXM5-SN-0001",
+                650,
+                fixture_identity(),
+            )
             .expect("seal should sign");
         let seal_b = signer
-            .seal(reversed, "NV-H100-SXM5-SN-0001", 650)
+            .seal(
+                reversed,
+                "NV-H100-SXM5-SN-0001",
+                650,
+                fixture_identity(),
+            )
             .expect("seal should sign");
 
-        // Different caller-supplied orderings must canonicalize to the same
-        // bytes (and therefore the same signature). `sealed_at_unix_ns`
-        // varies between calls, so compare the deterministic fields.
-        assert_eq!(
-            seal_a
-                .payload
-                .attributions
-                .iter()
-                .map(|a| a.pid)
-                .collect::<Vec<_>>(),
-            seal_b
-                .payload
-                .attributions
-                .iter()
-                .map(|a| a.pid)
-                .collect::<Vec<_>>(),
-        );
         assert_eq!(seal_a.payload.attributions, seal_b.payload.attributions);
-        // Sort enforces ascending PID order.
         assert_eq!(
             seal_a
                 .payload

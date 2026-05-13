@@ -36,7 +36,7 @@ use log::{debug, warn};
 
 use crate::core::{
     AmalgafyRegistry, EnergyProvider, PidEnergyAttribution, PowerSnapshot,
-    deterministic_attribution_uj,
+    deterministic_attribution_uj, nvml_window_energy_uj,
 };
 
 // ---------------------------------------------------------------------------
@@ -207,6 +207,27 @@ impl WindowsProvider {
         Ok(count)
     }
 
+    /// Borrow the NVML-derived hardware signature as an owned `String`.
+    /// Used by the cross-platform [`crate::core::HardwareIdentity`] probe to
+    /// surface this device's UUID without losing exclusive ownership of the
+    /// `WindowsProvider`.
+    #[must_use]
+    pub fn hardware_signature_string(&self) -> String {
+        self.hardware_signature.clone()
+    }
+
+    /// Read the GPU's instantaneous power draw in **milliwatts** —
+    /// `nvmlDeviceGetPowerUsage`'s native unit. Combined with
+    /// [`crate::core::nvml_window_energy_uj`] this gives µJ over a Δt
+    /// window without any unit-conversion hand-rolling at the call site.
+    pub fn read_power_mw(&self) -> Result<u32> {
+        let mut milliwatts: c_uint = 0;
+        // SAFETY: device handle was vended by nvmlDeviceGetHandleByIndex_v2.
+        let code = unsafe { nvmlDeviceGetPowerUsage(self.device_handle, &mut milliwatts) };
+        check_nvml(code, "nvmlDeviceGetPowerUsage")?;
+        Ok(milliwatts)
+    }
+
     /// Return the list of NVIDIA *compute contexts* currently running on this
     /// device. Each call queries NVML and copies the result into a fresh
     /// `Vec`; the internal NVML scratch buffer is reused, but the returned
@@ -233,11 +254,62 @@ impl WindowsProvider {
 
     /// Read the GPU's instantaneous power draw in microwatts.
     pub fn read_power_uw(&self) -> Result<u64> {
-        let mut milliwatts: c_uint = 0;
-        // SAFETY: device handle was vended by nvmlDeviceGetHandleByIndex_v2.
-        let code = unsafe { nvmlDeviceGetPowerUsage(self.device_handle, &mut milliwatts) };
-        check_nvml(code, "nvmlDeviceGetPowerUsage")?;
-        Ok(u64::from(milliwatts) * 1_000)
+        Ok(u64::from(self.read_power_mw()?) * 1_000)
+    }
+
+    /// Attribute energy to each currently-running compute PID over a
+    /// `dt_ms` window using the NVML power×time formula
+    /// `P(mW) × Δt(ms) = E(µJ)`, push the per-PID totals into `registry`,
+    /// and return the freshly allocated per-PID list so callers can hand it
+    /// to the [`crate::core::AmalgafySigner`] for sealing.
+    ///
+    /// This is the "Windows Differential Sampling" path. Daemons that prefer
+    /// the deterministic-attribution model can use [`attribute_window`]
+    /// instead.
+    pub fn sample_window_energy(
+        &mut self,
+        window_start_ns: u64,
+        window_end_ns: u64,
+        dt_ms: u64,
+        registry: &AmalgafyRegistry,
+    ) -> Result<Vec<PidEnergyAttribution>> {
+        let power_mw = self.read_power_mw()?;
+        let processes = self.sample_compute_processes()?.to_vec();
+
+        let total_window_uj = nvml_window_energy_uj(u64::from(power_mw), dt_ms);
+        if processes.is_empty() || total_window_uj == 0 {
+            return Ok(Vec::new());
+        }
+
+        let num_processes = processes.len() as u64;
+        let share = total_window_uj / num_processes;
+        let mut remainder = total_window_uj - share * num_processes;
+
+        let mut result = Vec::with_capacity(processes.len());
+        let burst_power_uw = u64::from(power_mw) * 1_000;
+        for proc in processes {
+            let extra = if remainder > 0 {
+                remainder -= 1;
+                1
+            } else {
+                0
+            };
+            let attributed = share + extra;
+            registry.add_micro_joules(proc.pid, attributed);
+            result.push(PidEnergyAttribution {
+                pid: proc.pid,
+                window_start_ns,
+                window_end_ns,
+                burst_power_uw,
+                attributed_energy_uj: attributed,
+                hardware_signature: self.hardware_signature.clone(),
+            });
+        }
+
+        self.busy_state.last_sample_ns = window_end_ns;
+        self.busy_state.last_pids = result.iter().map(|r| r.pid).collect();
+
+        Ok(result)
     }
 
     /// Attribute energy to each currently-running compute PID using the
@@ -402,6 +474,13 @@ impl EnergyProvider for WindowsProvider {
 
     fn hardware_signature(&self) -> &str {
         &self.hardware_signature
+    }
+
+    fn active_pids(&self) -> Vec<u32> {
+        // Surfaced from the most recent compute-process snapshot — the
+        // differential sampling loop reads this to fan a 100 ms Δ across
+        // the right PIDs without re-querying NVML.
+        self.busy_state.last_pids.clone()
     }
 }
 
