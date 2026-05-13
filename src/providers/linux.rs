@@ -140,9 +140,10 @@ impl LinuxProvider {
             attributed_energy_uj,
             hardware_signature: self.hardware_signature.clone(),
         };
-        // The submitter is no longer holding the fence after a `_signaled`
-        // event; drop it from the active set unless other events re-add it.
-        self.active_pids.remove(&event.submitter_pid);
+        // Do not remove the PID from `active_pids` on every `_signaled`
+        // event. A presence-only set cannot distinguish one completed fence
+        // from "no fences left", so unconditional removal can incorrectly
+        // mark a still-busy PID idle when it has other in-flight fences.
         self.pending.push(attribution.clone());
         attribution
     }
