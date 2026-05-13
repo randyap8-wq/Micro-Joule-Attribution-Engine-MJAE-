@@ -1,6 +1,7 @@
+#[cfg(target_os = "linux")]
 use std::marker::PhantomData;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 #[cfg(target_os = "linux")]
 use aya::programs::TracePoint;
 
@@ -29,15 +30,10 @@ impl LinuxProvider {
 
 impl EnergyProvider for LinuxProvider {
     fn sample_power_state(&mut self) -> Result<PowerSnapshot> {
-        Ok(PowerSnapshot {
-            observed_at_ns: 0,
-            idle_power_uw: 0,
-            active_power_uw: 0,
-            cpu_power_uw: 0,
-            gpu_power_uw: 0,
-            accelerator_power_uw: 0,
-            hardware_signature: self.hardware_signature.clone(),
-        })
+        bail!(
+            "linux power sampling is not implemented yet for hardware {}",
+            self.hardware_signature
+        )
     }
 
     fn attribute_joules_to_pid(
