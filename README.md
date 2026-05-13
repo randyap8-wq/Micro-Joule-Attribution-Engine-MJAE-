@@ -122,7 +122,3 @@ cargo test
 The crate is `no-UI`, `log`-based, and designed to be embedded inside a
 `tokio` daemon.
 
-## License
-
-Dual-licensed under either of MIT or Apache-2.0 at your option.
-
