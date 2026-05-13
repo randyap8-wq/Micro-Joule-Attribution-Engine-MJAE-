@@ -8,7 +8,7 @@ mod windows;
 #[cfg(target_os = "macos")]
 pub use apple_silicon::AppleSiliconProvider;
 #[cfg(target_os = "linux")]
-pub use linux::LinuxProvider;
+pub use linux::{DmaFenceEvent, LinuxProvider};
 #[cfg(target_os = "windows")]
 pub use windows::{NvmlComputeProcess, WindowsProvider};
 

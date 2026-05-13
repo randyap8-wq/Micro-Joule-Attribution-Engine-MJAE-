@@ -83,11 +83,25 @@ pub fn rapl_fallback_uj(rapl_uj_delta: u64, cpu_share_micros: u32) -> u64 {
     u64::try_from(scaled / 1_000_000).unwrap_or(u64::MAX)
 }
 
+/// Convert an NVML power reading in **milliwatts** measured over a window of
+/// `dt_ms` **milliseconds** into **micro-joules**.
+///
+/// `P(mW) × Δt(ms) = E(µJ)`. This is the closed-form energy used by the
+/// Windows / NVML sampling loop, where `nvmlDeviceGetPowerUsage` returns
+/// milliwatts and the daemon's `tokio::time::interval` gives Δt in
+/// milliseconds.
+#[inline]
+#[must_use]
+pub fn nvml_window_energy_uj(power_mw: u64, dt_ms: u64) -> u64 {
+    let energy: u128 = u128::from(power_mw) * u128::from(dt_ms);
+    u64::try_from(energy).unwrap_or(u64::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        baseline_burst_power_uw, burst_energy_uj, deterministic_attribution_uj, rapl_fallback_uj,
-        window_energy_uj,
+        baseline_burst_power_uw, burst_energy_uj, deterministic_attribution_uj,
+        nvml_window_energy_uj, rapl_fallback_uj, window_energy_uj,
     };
 
     #[test]
@@ -137,6 +151,17 @@ mod tests {
     #[test]
     fn rapl_fallback_clamps_share_to_one_hundred_percent() {
         assert_eq!(rapl_fallback_uj(10_000, 5_000_000), 10_000);
+    }
+
+    #[test]
+    fn nvml_window_energy_uses_milliwatt_millisecond_product() {
+        // 150 W = 150_000 mW. Over 100 ms that's 15 J = 15_000_000 µJ.
+        assert_eq!(nvml_window_energy_uj(150_000, 100), 15_000_000);
+    }
+
+    #[test]
+    fn nvml_window_energy_saturates_instead_of_overflowing() {
+        assert_eq!(nvml_window_energy_uj(u64::MAX, u64::MAX), u64::MAX);
     }
 }
 
