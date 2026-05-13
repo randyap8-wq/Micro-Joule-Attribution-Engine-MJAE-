@@ -166,10 +166,10 @@ impl Drop for ChannelRoot {
 }
 
 unsafe fn cf_dictionary_array(dictionary: CFDictionaryRef, key: &str) -> Result<CFArrayRef> {
-    let key = CfString::new(key)?;
-    let value = CFDictionaryGetValue(dictionary, key.as_raw().cast());
+    let cf_key = CfString::new(key)?;
+    let value = CFDictionaryGetValue(dictionary, cf_key.as_raw().cast());
     if value.is_null() {
-        bail!("IOReport dictionary is missing the {IOREPORT_CHANNELS_KEY} array");
+        bail!("IOReport dictionary is missing the {key} array");
     }
     Ok(value as CFArrayRef)
 }
