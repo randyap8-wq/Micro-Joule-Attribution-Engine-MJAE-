@@ -7,4 +7,5 @@ pub use crate::core::{
 };
 #[cfg(target_os = "macos")]
 pub use crate::providers::AppleSiliconProvider;
+#[cfg(target_os = "linux")]
 pub use crate::providers::LinuxProvider;
