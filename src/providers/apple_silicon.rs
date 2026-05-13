@@ -101,20 +101,20 @@ impl EnergyProvider for AppleSiliconProvider {
 
 #[inline]
 fn is_gpu_or_ane_energy_channel(group: &str, subgroup: &str, channel_name: &str) -> bool {
-    if group != ENERGY_MODEL_GROUP {
+    let group_upper = group.to_ascii_uppercase();
+    if group_upper != ENERGY_MODEL_GROUP.to_ascii_uppercase() {
         return false;
     }
 
-    let group = group.to_ascii_uppercase();
-    let subgroup = subgroup.to_ascii_uppercase();
-    let channel_name = channel_name.to_ascii_uppercase();
+    let subgroup_upper = subgroup.to_ascii_uppercase();
+    let channel_name_upper = channel_name.to_ascii_uppercase();
 
-    channel_name.starts_with("GPU")
-        || channel_name.starts_with("ANE")
-        || subgroup.contains("GPU")
-        || subgroup.contains("ANE")
-        || group.contains("GPU")
-        || group.contains("ANE")
+    channel_name_upper.starts_with("GPU")
+        || channel_name_upper.starts_with("ANE")
+        || subgroup_upper.contains("GPU")
+        || subgroup_upper.contains("ANE")
+        || group_upper.contains("GPU")
+        || group_upper.contains("ANE")
 }
 
 struct CfString(CFStringRef);
