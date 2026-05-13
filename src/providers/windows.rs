@@ -433,6 +433,24 @@ impl EnergyProvider for WindowsProvider {
         )
         .unwrap_or(u64::MAX);
 
+        // Refresh the active compute-process set so that callers using the
+        // default `start_sampling_loop` (which only invokes
+        // `sample_power_state` + `active_pids`) see real NVML compute PIDs
+        // instead of an empty list — otherwise the loop would fan all energy
+        // onto PID 0 even while real workloads are running.
+        match self.sample_compute_processes() {
+            Ok(procs) => {
+                self.busy_state.last_pids = procs.iter().map(|p| p.pid).collect();
+                self.busy_state.last_sample_ns = observed_at_ns;
+            }
+            Err(err) => {
+                warn!(
+                    "WindowsProvider[{}]::sample_power_state compute-process refresh failed: {err}",
+                    self.device_index
+                );
+            }
+        }
+
         Ok(PowerSnapshot {
             observed_at_ns,
             idle_power_uw: 0,
