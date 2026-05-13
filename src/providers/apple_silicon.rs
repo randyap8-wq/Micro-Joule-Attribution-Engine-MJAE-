@@ -130,11 +130,13 @@ impl AppleSiliconProvider {
     /// Open a live IOReport subscription against the Energy Model group and
     /// pull one differential sample, returning per-channel µJ deltas.
     ///
-    /// This drives `IOReportCreateSubscription` → `IOReportCreateSamplesDelta`
-    /// → `IOReportIterate` end-to-end. It is the macOS counterpart of
+    /// This uses `IOReportCreateSubscription` together with
+    /// `IOReportCreateSamplesDelta`, then reads the resulting
+    /// `IOReportChannels` `CFArray` directly rather than calling
+    /// `IOReportIterate`. It is the macOS counterpart of
     /// `nvmlDeviceGetPowerUsage` on Windows and the RAPL counter on Linux.
     ///
-    /// Each iterated channel returns a raw "energy resumption count" that
+    /// Each channel entry returns a raw "energy resumption count" that
     /// IOReport publishes in nanojoules; we convert that into micro-joules
     /// by dividing by [`NJ_PER_UJ`].
     pub fn sample_energy_model_delta(&self) -> Result<Vec<AppleEnergyDelta>> {
