@@ -116,11 +116,36 @@ pub trait EnergyProvider {
     /// currently-active PIDs, and pushes the result into `registry` without
     /// locks.
     ///
+    /// **Attribution model — equal-split baseline.** This default loop
+    /// divides each ΔµJ evenly across [`Self::active_pids`]; it does *not*
+    /// yet wire in the deterministic, occupancy-weighted model from
+    /// [`deterministic_attribution_uj`](crate::core::deterministic_attribution_uj).
+    /// Equal-split is honest when every active PID is saturating the same
+    /// shared accelerator, but it is *not* the per-process precision the
+    /// crate-level documentation describes. Daemons that need
+    /// occupancy-weighted attribution should drive
+    /// [`crate::WindowsProvider::attribute_window`] (NVML compute contexts +
+    /// per-PID accelerator time on Windows) or
+    /// [`crate::LinuxProvider::correlate_fence`] (per-`dma_fence`
+    /// submitter-PID windows on Linux) directly from their main loop and
+    /// rely on `sync_registry` to drain the resulting attributions.
+    ///
     /// A "heartbeat" log line is emitted on every successful tick so
     /// operators can see the daemon's live cadence and the running total
     /// power Δ. If `sample_power_state` returns an error, the loop logs a
     /// warning and continues — a transient telemetry hiccup must never kill
     /// the daemon.
+    ///
+    /// **Telemetry-hang resilience.** `sample_power_state` is synchronous,
+    /// so the loop cannot wrap it in a `tokio::time::timeout`. Providers
+    /// MUST therefore bound their own I/O — NVML calls, IOReport reads, and
+    /// RAPL/sysfs reads — so that a kernel deadlock cannot freeze the 100 ms
+    /// tick indefinitely. The Linux RAPL path reads a sysfs file (which is
+    /// kernel-bounded), NVML returns within `nvmlDeviceGetPowerUsage`'s
+    /// internal timeout, and IOReport's delta call returns synchronously
+    /// from a CFRunLoop-free path. Custom providers that wrap blocking
+    /// calls should defensively use `std::thread::spawn` + bounded receive
+    /// before calling into the trait method.
     ///
     /// This is an `async fn`, not a spawned task: callers wrap it in
     /// `tokio::spawn` themselves so they keep full control over the worker

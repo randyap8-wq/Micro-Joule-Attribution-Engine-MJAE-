@@ -10,6 +10,7 @@ pub use attribution::{
     nvml_window_energy_uj, rapl_fallback_uj, window_energy_uj,
 };
 pub use hardware::{HardwareIdentity, HardwareIdentitySource};
+#[allow(deprecated)]
 pub use manifest::{EnergyManifest, EnergyManifestPayload};
 pub use provider::{
     EnergyProvider, PidEnergyAttribution, PowerSnapshot, SAMPLING_LOOP_INTERVAL_MS,

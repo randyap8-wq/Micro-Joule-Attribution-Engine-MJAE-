@@ -42,15 +42,40 @@ impl AmalgafyRegistry {
     ///
     /// Returns the new cumulative total for the PID. Saturates at `u64::MAX`
     /// so long-running daemons never overflow silently.
+    ///
+    /// # Concurrency
+    ///
+    /// First-insert correctness is non-trivial here: a naive
+    /// `if get().is_none() { insert(zero) }` pattern has a TOCTOU race
+    /// because `SkipMap::insert` *replaces* on collision rather than
+    /// returning the entry that ends up living in the map. Two providers
+    /// (e.g. Linux RAPL + a GPU provider) racing on the same
+    /// never-before-seen PID would each insert a fresh zero slot, the
+    /// second insert silently evicting the first, and the delta the first
+    /// thread accumulated onto its (now-orphaned) entry would be lost.
+    /// Worse, [`SkipMap::get`] called right after an `insert` can briefly
+    /// observe `None` in the window where a concurrent insert has marked
+    /// the previous node's tower for removal but has not yet spliced in
+    /// its replacement node, so even a re-fetch is not race-free.
+    ///
+    /// We sidestep the whole class of races by using
+    /// [`SkipMap::get_or_insert`], which is documented as inserting the
+    /// supplied value *only if the key is absent* and otherwise returning
+    /// the existing entry. Every concurrent caller sees the same canonical
+    /// `AtomicU64` slot, so every delta is accumulated and none is dropped.
     pub fn add_micro_joules(&self, pid: u32, delta_uj: u64) -> u64 {
+        // Fast path — PID already tracked. Avoids the AtomicU64 allocation
+        // (and the epoch pin) on the hot path; `get_or_insert` would do the
+        // same job correctness-wise but always pays the allocation.
         if let Some(entry) = self.table.get(&pid) {
             return saturating_add(entry.value(), delta_uj);
         }
 
-        // The PID may have been inserted concurrently between the `get` and
-        // here; `SkipMap::insert` returns the entry that ends up living in the
-        // map, so accumulating onto its value is always correct.
-        let entry = self.table.insert(pid, AtomicU64::new(0));
+        // Cold path — `get_or_insert` returns the entry that ends up living
+        // in the map. If two threads race here, exactly one
+        // freshly-allocated `AtomicU64` wins and every racer accumulates
+        // onto it.
+        let entry = self.table.get_or_insert(pid, AtomicU64::new(0));
         saturating_add(entry.value(), delta_uj)
     }
 
@@ -198,5 +223,61 @@ mod tests {
         let second = global_registry() as *const _;
 
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn concurrent_first_insert_does_not_lose_deltas() {
+        // Regression test for the TOCTOU window between `get` and `insert`
+        // in `add_micro_joules`. With the buggy implementation, two threads
+        // racing on a never-before-seen PID would each `insert` a fresh
+        // zero slot — the second insert silently overwriting the first —
+        // and the delta the first thread accumulated onto its
+        // now-orphaned entry would be lost. After the fix both threads
+        // accumulate onto the same `get_or_insert`-returned canonical slot,
+        // and no delta can be dropped.
+        //
+        // The per-PID and total assertions are what actually catch the
+        // regression: each thread's local `add_micro_joules` return value
+        // would still be >= 1 under the buggy path (it always at least
+        // adds 1 onto the AtomicU64 it just installed before that
+        // AtomicU64 is later overwritten by a racer), so only the
+        // post-hoc registry totals can prove no delta was lost.
+        use std::sync::Arc;
+        use std::thread;
+
+        const THREADS: usize = 16;
+        const ITERATIONS: usize = 200;
+
+        let registry = Arc::new(AmalgafyRegistry::new());
+        let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+
+        let mut handles = Vec::with_capacity(THREADS);
+        for _ in 0..THREADS {
+            let registry = Arc::clone(&registry);
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                for i in 0..ITERATIONS {
+                    // Use a fresh, never-before-seen PID per iteration so
+                    // every increment hits the cold-path race window.
+                    let pid = (i as u32) * 1_000 + 1;
+                    barrier.wait();
+                    registry.add_micro_joules(pid, 1);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("worker should not panic");
+        }
+
+        // The per-PID totals must sum exactly to THREADS*ITERATIONS: no
+        // delta may be dropped during the cold-path race.
+        assert_eq!(
+            registry.total_micro_joules(),
+            (THREADS * ITERATIONS) as u64
+        );
+        for i in 0..ITERATIONS {
+            let pid = (i as u32) * 1_000 + 1;
+            assert_eq!(registry.get(pid), Some(THREADS as u64));
+        }
     }
 }
