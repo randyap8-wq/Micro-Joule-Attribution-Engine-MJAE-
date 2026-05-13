@@ -1,6 +1,7 @@
 pub mod core;
 pub mod providers;
 
+#[allow(deprecated)]
 pub use crate::core::{
     AMALGAFY_SEAL_INTERVAL_SECS, AmalgafyRegistry, AmalgafySeal, AmalgafySealPayload,
     AmalgafySigner, EnergyManifest, EnergyManifestPayload, EnergyProvider, HardwareIdentity,

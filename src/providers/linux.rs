@@ -44,6 +44,25 @@ pub struct DmaFenceEvent {
 /// non-Linux hosts) and exposes a `pending` buffer that lets higher-level
 /// orchestrators inject already-attributed records during tests or
 /// simulation runs.
+///
+/// **eBPF program shipping.** Only the user-space half of the
+/// `dma_fence:dma_fence_signaled` correlator lives in this crate. The
+/// kernel-side `.bpf.c` / Aya eBPF object that emits the events and the
+/// `TracePoint::load` + `attach` glue that drains the perf ring are *not*
+/// shipped — operators are expected to build and attach their own probe
+/// and feed events into [`Self::correlate_fence`] /
+/// [`Self::enqueue_attribution`] / [`Self::mark_pid_active`] /
+/// [`Self::mark_pid_idle`]. See the README's "Linux eBPF integration"
+/// section for the integration contract.
+///
+/// **Cloning semantics.** `Clone` is derived for convenience but the clone
+/// is an *independent state machine*: it has its own `pending` buffer,
+/// `active_pids` map, and `rapl_state`. Cloning a live provider therefore
+/// creates a second tracker for the same hardware whose attributions will
+/// not be visible to the original. Daemons should clone only when that
+/// fan-out is deliberate (e.g. when handing a snapshot to a test harness)
+/// and use `Arc<Mutex<LinuxProvider>>` or similar when they need shared
+/// state across tasks.
 #[derive(Debug, Clone)]
 pub struct LinuxProvider {
     hardware_signature: String,

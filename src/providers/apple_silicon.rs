@@ -80,18 +80,59 @@ pub struct AppleSiliconProvider {
     /// have a richer source (e.g. `proc_listpids`) push the set in via
     /// [`AppleSiliconProvider::set_active_pids`].
     active_pids: Vec<u32>,
+    /// Calibrated idle baseline for this SoC, in microwatts. IOReport does
+    /// not expose an "idle floor" channel, so operators must measure their
+    /// machine's at-rest power once (e.g. with `powermetrics` at the login
+    /// screen) and pass the result via [`AppleSiliconProvider::with_idle_power_uw`]
+    /// or [`AppleSiliconProvider::set_idle_power_uw`]. When left at 0, the
+    /// attribution math treats 100% of active power as burst energy, which
+    /// inflates the macOS µJ totals at low utilization. Defaulting to 0
+    /// surfaces this as a deliberate choice rather than a hidden assumption.
+    idle_power_uw: u64,
 }
 
 impl AppleSiliconProvider {
+    /// Construct a provider with an uncalibrated idle baseline (0 µW).
+    ///
+    /// At 0 µW the attribution math treats every microwatt of measured
+    /// power as burst energy, which inflates the macOS numbers at low
+    /// utilization. Production callers should measure their host's at-rest
+    /// power and pass it via [`Self::with_idle_power_uw`] or set it later
+    /// with [`Self::set_idle_power_uw`].
     #[must_use]
     pub fn new(hardware_signature: impl Into<String>) -> Self {
+        Self::with_idle_power_uw(hardware_signature, 0)
+    }
+
+    /// Construct a provider with a calibrated idle baseline.
+    ///
+    /// `idle_power_uw` is the SoC's at-rest power draw in microwatts. The
+    /// differential sampling loop subtracts this floor from each
+    /// `active_power_uw` reading so the µJ accumulated against each PID is
+    /// the *burst-above-idle* energy the workload actually caused, not the
+    /// machine's always-on baseline.
+    #[must_use]
+    pub fn with_idle_power_uw(hardware_signature: impl Into<String>, idle_power_uw: u64) -> Self {
         Self {
             hardware_signature: hardware_signature.into(),
             pending: Vec::new(),
             ioreport_state: IoReportState::default(),
             ioreport_handles: None,
             active_pids: Vec::new(),
+            idle_power_uw,
         }
+    }
+
+    /// Update the calibrated idle baseline. Useful for daemons that
+    /// re-calibrate at runtime (e.g. after a thermal-state transition).
+    pub fn set_idle_power_uw(&mut self, idle_power_uw: u64) {
+        self.idle_power_uw = idle_power_uw;
+    }
+
+    /// Currently configured idle baseline (in µW).
+    #[must_use]
+    pub fn idle_power_uw(&self) -> u64 {
+        self.idle_power_uw
     }
 
     /// Enqueue an attribution derived from an IOReport sample so that the
@@ -362,7 +403,7 @@ impl EnergyProvider for AppleSiliconProvider {
 
         Ok(PowerSnapshot {
             observed_at_ns,
-            idle_power_uw: 0,
+            idle_power_uw: self.idle_power_uw,
             active_power_uw,
             cpu_power_uw: 0,
             gpu_power_uw: 0,

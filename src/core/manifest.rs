@@ -1,6 +1,30 @@
+//! Legacy single-PID signed manifest.
+//!
+//! [`EnergyManifest`] was the original per-PID signed payload before the
+//! "Amalgafy Seal" was added. The canonical public API for cryptographically
+//! attesting per-PID attributions is now
+//! [`AmalgafySeal`](crate::core::signer::AmalgafySeal), which:
+//!
+//! * covers an entire window of attributions (not just one PID),
+//! * binds the signature to a [`HardwareIdentity`](crate::core::hardware::HardwareIdentity),
+//! * encodes the payload using a deterministic canonical JSON form so two
+//!   daemons observing the same logical state produce byte-identical
+//!   signatures.
+//!
+//! `EnergyManifest` is retained for backwards compatibility with deployed
+//! verifiers that have not yet migrated. New code should use `AmalgafySeal`.
+
+#![allow(deprecated)]
+
 use anyhow::Result;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 
+#[deprecated(
+    since = "0.1.0",
+    note = "Use `AmalgafySealPayload` from `crate::core::signer` instead. \
+            `EnergyManifestPayload` only covers a single PID and is not bound \
+            to a `HardwareIdentity`; it is kept for backwards compatibility."
+)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EnergyManifestPayload {
     pub manifest_version: u32,
@@ -15,6 +39,14 @@ pub struct EnergyManifestPayload {
     pub attributed_energy_uj: u64,
 }
 
+#[deprecated(
+    since = "0.1.0",
+    note = "Use `AmalgafySeal` from `crate::core::signer` instead. \
+            `EnergyManifest` only covers a single PID, lacks canonical-JSON \
+            encoding, and is not bound to a `HardwareIdentity`; it is kept \
+            for backwards compatibility with verifiers that have not yet \
+            migrated to the Amalgafy Seal."
+)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EnergyManifest {
     pub payload: EnergyManifestPayload,
@@ -22,6 +54,7 @@ pub struct EnergyManifest {
     pub signature: Vec<u8>,
 }
 
+#[allow(deprecated)]
 impl EnergyManifest {
     pub fn sign(payload: EnergyManifestPayload, signing_key: &SigningKey) -> Result<Self> {
         let signature = signing_key.sign(&serde_json::to_vec(&payload)?).to_bytes();
@@ -49,6 +82,7 @@ impl EnergyManifest {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use ed25519_dalek::{SECRET_KEY_LENGTH, SigningKey};
 
