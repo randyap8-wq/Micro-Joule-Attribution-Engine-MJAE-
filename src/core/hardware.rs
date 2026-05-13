@@ -388,14 +388,15 @@ mod windows {
     use crate::providers::WindowsProvider;
 
     pub(super) fn probe_device(device_index: u32) -> Result<HardwareIdentity> {
-        // `WindowsProvider::new` already drives `nvmlDeviceGetUUID` /
-        // `nvmlDeviceGetSerial` and exposes the result as its hardware
-        // signature — reuse that path so there is exactly one NVML entry
-        // point in the crate.
+        // `WindowsProvider::new` exposes its hardware signature using the
+        // provider's normal NVML probe order, which prefers the device serial
+        // and only falls back to the UUID. Reuse that path so there is exactly
+        // one NVML entry point in the crate, but label the source to match the
+        // actual value being surfaced to auditors.
         let provider = WindowsProvider::new(device_index)?;
         Ok(HardwareIdentity {
             fingerprint: provider.hardware_signature_string(),
-            source: HardwareIdentitySource::WindowsNvmlUuid,
+            source: HardwareIdentitySource::WindowsNvmlSerial,
         })
     }
 }
