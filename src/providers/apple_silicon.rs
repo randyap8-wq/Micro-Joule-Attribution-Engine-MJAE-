@@ -113,8 +113,6 @@ fn is_gpu_or_ane_energy_channel(group: &str, subgroup: &str, channel_name: &str)
         || channel_name_upper.starts_with("ANE")
         || subgroup_upper.contains("GPU")
         || subgroup_upper.contains("ANE")
-        || group_upper.contains("GPU")
-        || group_upper.contains("ANE")
 }
 
 struct CfString(CFStringRef);
