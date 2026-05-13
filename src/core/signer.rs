@@ -114,9 +114,15 @@ impl AmalgafySigner {
     /// signature explicitly covers the hardware serial and the total joules so
     /// an attacker cannot swap a high-energy payload for a different machine
     /// or zero out the total without invalidating the signature.
+    ///
+    /// Determinism: `attributions` is sorted by `(pid, window_start_ns,
+    /// window_end_ns)` before being canonicalized, so two daemons observing
+    /// the same logical state produce byte-identical canonical payloads (and
+    /// therefore byte-identical signatures) regardless of the order in which
+    /// the caller assembled the input.
     pub fn seal(
         &self,
-        attributions: Vec<PidEnergyAttribution>,
+        mut attributions: Vec<PidEnergyAttribution>,
         hardware_serial: impl Into<String>,
         total_micro_joules: u64,
     ) -> Result<AmalgafySeal> {
@@ -127,6 +133,16 @@ impl AmalgafySigner {
                 .unwrap_or(0),
         )
         .unwrap_or(u64::MAX);
+
+        // Enforce a deterministic order at the API boundary so the
+        // "canonical JSON" promise cannot be accidentally violated by a
+        // caller assembling attributions in a different order.
+        attributions.sort_by(|a, b| {
+            a.pid
+                .cmp(&b.pid)
+                .then(a.window_start_ns.cmp(&b.window_start_ns))
+                .then(a.window_end_ns.cmp(&b.window_end_ns))
+        });
 
         let payload = AmalgafySealPayload {
             manifest_version: self.manifest_version,
@@ -150,8 +166,9 @@ impl AmalgafySigner {
 
 /// Encode `payload` in a canonical JSON form: all object keys are sorted
 /// lexicographically and there is no insignificant whitespace. Arrays preserve
-/// their insertion order — callers (e.g. the registry) are responsible for
-/// sorting attribution lists by PID before sealing.
+/// their insertion order, so producers that want signature-level determinism
+/// across hosts must sort array contents before handing them to this function
+/// — [`AmalgafySigner::seal`] does that for its attribution list.
 ///
 /// This is **not** a full JCS implementation (RFC 8785), but it is sufficient
 /// for the homogeneous payload shape produced by [`AmalgafySigner::seal`],
@@ -245,6 +262,51 @@ mod tests {
         seal.payload.hardware_serial = "WRONG-SERIAL".to_owned();
 
         assert!(seal.verify().is_err());
+    }
+
+    #[test]
+    fn seal_is_order_independent_across_attribution_inputs() {
+        let signer = AmalgafySigner::new(SigningKey::from_bytes(&[9_u8; SECRET_KEY_LENGTH]));
+
+        let forward = fixture_attributions();
+        let mut reversed = fixture_attributions();
+        reversed.reverse();
+
+        let seal_a = signer
+            .seal(forward, "NV-H100-SXM5-SN-0001", 650)
+            .expect("seal should sign");
+        let seal_b = signer
+            .seal(reversed, "NV-H100-SXM5-SN-0001", 650)
+            .expect("seal should sign");
+
+        // Different caller-supplied orderings must canonicalize to the same
+        // bytes (and therefore the same signature). `sealed_at_unix_ns`
+        // varies between calls, so compare the deterministic fields.
+        assert_eq!(
+            seal_a
+                .payload
+                .attributions
+                .iter()
+                .map(|a| a.pid)
+                .collect::<Vec<_>>(),
+            seal_b
+                .payload
+                .attributions
+                .iter()
+                .map(|a| a.pid)
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(seal_a.payload.attributions, seal_b.payload.attributions);
+        // Sort enforces ascending PID order.
+        assert_eq!(
+            seal_a
+                .payload
+                .attributions
+                .iter()
+                .map(|a| a.pid)
+                .collect::<Vec<_>>(),
+            vec![7, 4242],
+        );
     }
 
     #[test]
