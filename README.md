@@ -123,8 +123,9 @@ Operators are expected to:
    that attaches to `tracepoint/dma_fence/dma_fence_signaled` and
    `tracepoint/dma_fence/dma_fence_init`.
 2. Load it with `aya::Bpf::load(...)` and attach the `TracePoint`
-   programs at the constants `LinuxProvider::DMA_FENCE_TRACEPOINT` /
-   `LinuxProvider::SCHED_SWITCH_TRACEPOINT`.
+   programs to `LinuxProvider::DMA_FENCE_TRACEPOINT` for
+   `dma_fence:dma_fence_signaled` and to `dma_fence:dma_fence_init`
+   for the init hook.
 3. Drain the perf array and, for each event, call
    [`LinuxProvider::mark_pid_active`] / [`LinuxProvider::correlate_fence`] /
    [`LinuxProvider::mark_pid_idle`] (and finally
