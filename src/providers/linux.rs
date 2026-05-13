@@ -51,3 +51,17 @@ impl EnergyProvider for LinuxProvider {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::core::EnergyProvider;
+
+    use super::LinuxProvider;
+
+    #[test]
+    fn sample_power_state_returns_explicit_error_until_sampling_exists() {
+        let mut provider = LinuxProvider::new("NV-H100");
+
+        assert!(provider.sample_power_state().is_err());
+    }
+}
