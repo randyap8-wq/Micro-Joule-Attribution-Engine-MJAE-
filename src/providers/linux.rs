@@ -68,9 +68,10 @@ struct RaplState {
 impl LinuxProvider {
     pub const DMA_FENCE_TRACEPOINT: &str = "dma_fence:dma_fence_signaled";
     pub const SCHED_SWITCH_TRACEPOINT: &str = "sched:sched_switch";
-    /// Default RAPL energy counter. Daemons running on AMD or on platforms
-    /// where this path is hidden behind permissions should call
-    /// [`LinuxProvider::with_rapl_path`] to override.
+    /// Default RAPL energy counter path used by the provider when reading
+    /// package energy from sysfs. This path is platform-dependent and may be
+    /// unavailable on some systems (for example, AMD hosts, containers, or
+    /// systems with restricted powercap access).
     pub const DEFAULT_RAPL_ENERGY_PATH: &str = "/sys/class/powercap/intel-rapl:0/energy_uj";
 
     #[must_use]
