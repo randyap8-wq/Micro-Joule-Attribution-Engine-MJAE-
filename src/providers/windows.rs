@@ -18,10 +18,12 @@
 //!   raw FFI so the binary stays small and we don't drag in a heavy wrapper
 //!   crate.
 //!
-//! The provider is a "zero-copy where possible" design: NVML compute-process
-//! arrays are reused across samples instead of being reallocated, and PIDs
-//! are pushed into the [`AmalgafyRegistry`] without any intermediate
-//! `Vec<u8>` serialization.
+//! The provider keeps allocations on the hot path low: the internal
+//! `Vec<NvmlProcessInfoV3>` scratch buffer used to talk to NVML is reused
+//! across samples (its capacity only grows), and PIDs are pushed into the
+//! [`AmalgafyRegistry`] without any intermediate `Vec<u8>` serialization.
+//! Public accessors return owned `Vec`s so callers can hold them past the
+//! next sample without lifetime gymnastics.
 
 use std::ffi::{CStr, c_uint, c_ulonglong};
 use std::mem::MaybeUninit;
@@ -205,8 +207,11 @@ impl WindowsProvider {
         Ok(count)
     }
 
-    /// Return a slice view over the NVML compute-process list. The slice is
-    /// re-used across calls, so callers must consume it before the next call.
+    /// Return the list of NVIDIA *compute contexts* currently running on this
+    /// device. Each call queries NVML and copies the result into a fresh
+    /// `Vec`; the internal NVML scratch buffer is reused, but the returned
+    /// `Vec` is owned by the caller and is safe to hold across subsequent
+    /// samples.
     pub fn list_compute_processes(&mut self) -> Result<Vec<NvmlComputeProcess>> {
         let raw = self.sample_compute_processes()?;
         Ok(raw
@@ -236,16 +241,19 @@ impl WindowsProvider {
     }
 
     /// Attribute energy to each currently-running compute PID using the
-    /// deterministic model, push the totals into `registry`, and return the
-    /// per-PID list for sealing.
+    /// deterministic model, push the per-PID totals into `registry`, and
+    /// return the freshly allocated per-PID list so callers can hand it to
+    /// the [`crate::core::AmalgafySigner`] for sealing.
     ///
     /// `idle_power_uw` is the calibrated idle baseline for this GPU (queried
-    /// once at startup and persisted in the daemon's config).
+    /// once at startup and persisted in the daemon's config). The returned
+    /// `Vec` is owned by the caller; the provider keeps no reference to it.
     pub fn attribute_window(
         &mut self,
         window_start_ns: u64,
         window_end_ns: u64,
         idle_power_uw: u64,
+        registry: &AmalgafyRegistry,
     ) -> Result<Vec<PidEnergyAttribution>> {
         let total_power_uw = self.read_power_uw()?;
         let processes = self.sample_compute_processes()?.to_vec();
@@ -278,6 +286,7 @@ impl WindowsProvider {
                 per_process_ns,
                 window_ns,
             );
+            registry.add_micro_joules(proc.pid, attributed);
             result.push(PidEnergyAttribution {
                 pid: proc.pid,
                 window_start_ns,
@@ -294,6 +303,11 @@ impl WindowsProvider {
         Ok(result)
     }
 
+    /// Borrow the internal NVML scratch buffer after refilling it from
+    /// `nvmlDeviceGetComputeRunningProcesses_v3`. The returned slice aliases
+    /// `self.compute_scratch` and is invalidated by the next call, so this
+    /// stays private; public consumers copy out via [`list_compute_processes`]
+    /// or [`attribute_window`].
     fn sample_compute_processes(&mut self) -> Result<&[NvmlProcessInfoV3]> {
         loop {
             let mut count: c_uint = self.compute_scratch.capacity() as c_uint;
