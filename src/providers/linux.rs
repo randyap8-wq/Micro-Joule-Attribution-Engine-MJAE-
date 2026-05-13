@@ -156,9 +156,9 @@ impl LinuxProvider {
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_nanos())
-                .unwrap_or(0),
+                .unwrap_or(0_u128),
         )
-        .unwrap_or(u64::MAX);
+        .unwrap_or(0);
 
         let power_uw = if let Some(prev) = self.rapl_state {
             let delta_uj = energy_uj.saturating_sub(prev.energy_uj);

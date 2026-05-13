@@ -330,9 +330,10 @@ impl EnergyProvider for AppleSiliconProvider {
             "AppleSiliconProvider::sync_registry pushed {total} µJ for hardware {}",
             self.hardware_signature
         );
-        if total == 0 && self.active_pids.is_empty() {
+        if total == 0 && !self.active_pids.is_empty() {
             warn!(
-                "AppleSiliconProvider::sync_registry: no pending attributions and no active PIDs"
+                "AppleSiliconProvider::sync_registry: {} PIDs active but no IOReport attributions drained this cycle",
+                self.active_pids.len()
             );
         }
         Ok(total)

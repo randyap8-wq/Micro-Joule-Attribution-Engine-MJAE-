@@ -172,11 +172,16 @@ pub trait EnergyProvider {
                         // "unattributed system" share explicitly.
                         registry.add_micro_joules(0, delta_uj);
                     } else {
-                        let share = delta_uj / (pids.len() as u64).max(1);
-                        let mut remainder = delta_uj - share * pids.len() as u64;
+                        let num_pids = pids.len() as u64;
+                        let share = delta_uj / num_pids;
+                        // `share * num_pids` cannot exceed `delta_uj` by
+                        // construction (integer division), so the
+                        // subtraction is total-preserving and overflow-free.
+                        let mut remainder = delta_uj - share.saturating_mul(num_pids);
                         for pid in &pids {
-                            // Give the remainder to the lowest-PID bucket so
-                            // the math is deterministic and total-preserving.
+                            // Give the remainder to the lowest-PID buckets
+                            // so the math is deterministic and
+                            // total-preserving.
                             let extra = if remainder > 0 {
                                 remainder -= 1;
                                 1

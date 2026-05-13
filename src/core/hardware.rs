@@ -202,7 +202,7 @@ mod linux {
                 }
             }
         }
-        bail!("no /sys/class/drm/*/device/uuid file is readable")
+        bail!("no GPU UUID found in any /sys/class/drm/*/device/uuid file")
     }
 }
 
