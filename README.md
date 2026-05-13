@@ -209,7 +209,3 @@ The crate is **UI-free**, `log`-based, and designed to be embedded inside a
 `tokio` daemon. All hot paths use `u64` for µJ and `u64` for ns; the
 registry uses `AtomicU64` plus a lock-free `SkipMap` so the 100 ms heartbeat
 loop runs without contention.
-
-## License
-
-Dual-licensed under either of MIT or Apache-2.0 at your option.
