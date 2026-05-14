@@ -280,6 +280,13 @@ Recommended practices (in roughly increasing order of strength):
   treat any seal carrying a revoked key as unverifiable regardless of
   signature validity.
 
+In-memory protection for the signing key is enabled by depending on
+`ed25519-dalek` with the `zeroize` feature, which gives `SigningKey` a
+`ZeroizeOnDrop` implementation: its secret bytes are overwritten before
+deallocation so a heap dump or swap-file read cannot recover them after
+the key value is dropped. This complements — but does not replace — the
+storage strategies above.
+
 ### Legacy `EnergyManifest`
 
 [`EnergyManifest`](src/core/manifest.rs) was the original per-PID signed
