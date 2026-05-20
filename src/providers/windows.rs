@@ -182,7 +182,7 @@ impl WindowsProvider {
         let code = unsafe { nvmlDeviceGetHandleByIndex_v2(device_index, &mut handle) };
         check_nvml(code, "nvmlDeviceGetHandleByIndex_v2")?;
 
-        let (serial, signature_source) = match read_nvml_serial(handle) {
+        let (signature, signature_source) = match read_nvml_serial(handle) {
             Ok(s) => (s, HardwareIdentitySource::WindowsNvmlSerial),
             Err(err) => {
                 warn!("nvmlDeviceGetSerial failed, falling back to UUID: {err}");
@@ -197,7 +197,7 @@ impl WindowsProvider {
         };
 
         Ok(Self {
-            hardware_signature: serial,
+            hardware_signature: signature,
             signature_source,
             device_index,
             device_handle: handle,
