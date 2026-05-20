@@ -93,9 +93,9 @@ fn ensure_nvml_initialized() -> Result<()> {
         // SAFETY: nvmlInit_v2 is documented as safe to call multiple times in
         // the same process but we still gate it behind a Once.
         let code = unsafe { nvmlInit_v2() };
-        NVML_INIT_RESULT.store(code, Ordering::SeqCst);
+        NVML_INIT_RESULT.store(code, Ordering::Release);
     });
-    let result = NVML_INIT_RESULT.load(Ordering::SeqCst);
+    let result = NVML_INIT_RESULT.load(Ordering::Acquire);
     if result != NVML_SUCCESS {
         bail!("nvmlInit_v2 failed: {}", nvml_error_string(result));
     }
