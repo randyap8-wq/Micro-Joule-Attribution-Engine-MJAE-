@@ -84,9 +84,8 @@ impl AmalgafyRegistry {
     /// Uses `Acquire` ordering so the load synchronises with the `AcqRel`
     /// release store performed by [`add_micro_joules`]; the per-PID counter
     /// is monotonically increasing and never repurposed, but a relaxed
-    /// load could observe a stale value indefinitely on weakly-ordered
-    /// architectures, which `Acquire` rules out at zero cost on x86_64 /
-    /// AArch64.
+    /// load could observe a stale value indefinitely on weakly ordered
+    /// architectures, which `Acquire` rules out.
     #[must_use]
     pub fn get(&self, pid: u32) -> Option<u64> {
         self.table
