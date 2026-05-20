@@ -11,4 +11,3 @@ pub use apple_silicon::AppleSiliconProvider;
 pub use linux::{DmaFenceEvent, LinuxProvider};
 #[cfg(target_os = "windows")]
 pub use windows::{NvmlComputeProcess, WindowsProvider};
-

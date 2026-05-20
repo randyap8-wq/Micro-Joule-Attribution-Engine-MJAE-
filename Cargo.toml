@@ -35,3 +35,9 @@ lto = "thin"
 opt-level = 3
 panic = "abort"
 strip = "symbols"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[lints.clippy]
+needless_return = "warn"

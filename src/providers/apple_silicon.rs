@@ -39,10 +39,9 @@ pub struct AppleEnergyDelta {
 
 #[derive(Debug, Clone, Default)]
 struct IoReportState {
-    /// Cumulative `nanojoules` total reported on the previous tick. We hold
-    /// the previous snapshot here so `start_sampling_loop` can compute
-    /// deltas without re-reading historical state from IOKit.
-    last_total_nj: u64,
+    /// Wall-clock timestamp of the previous sample, used so
+    /// `sample_power_state` can convert the µJ delta into an instantaneous
+    /// µW reading by dividing by the inter-tick gap.
     last_observed_at_ns: u64,
 }
 
@@ -355,9 +354,9 @@ impl EnergyProvider for AppleSiliconProvider {
 
         let deltas = match self.sample_energy_model_delta() {
             Ok(deltas) => deltas,
-            Err(err) => bail!(
-                "AppleSiliconProvider::sample_power_state failed to read IOReport: {err}"
-            ),
+            Err(err) => {
+                bail!("AppleSiliconProvider::sample_power_state failed to read IOReport: {err}")
+            }
         };
 
         let total_uj: u64 = deltas
@@ -382,12 +381,8 @@ impl EnergyProvider for AppleSiliconProvider {
             u64::try_from(p).unwrap_or(u64::MAX)
         };
 
-        // Stamp the state so the next call has a baseline. `total_nj` is
-        // kept for future audit log enrichment.
-        self.ioreport_state.last_total_nj = self
-            .ioreport_state
-            .last_total_nj
-            .saturating_add(total_uj.saturating_mul(NJ_PER_UJ));
+        // Stamp the timestamp so the next call has a baseline for the
+        // µJ→µW conversion.
         self.ioreport_state.last_observed_at_ns = observed_at_ns;
 
         for delta in &deltas {
@@ -463,18 +458,35 @@ impl EnergyProvider for AppleSiliconProvider {
 
 #[inline]
 fn is_gpu_or_ane_energy_channel(group: &str, subgroup: &str, channel_name: &str) -> bool {
-    let group_upper = group.to_ascii_uppercase();
-    if group_upper != ENERGY_MODEL_GROUP.to_ascii_uppercase() {
+    if !group.eq_ignore_ascii_case(ENERGY_MODEL_GROUP) {
         return false;
     }
 
-    let subgroup_upper = subgroup.to_ascii_uppercase();
-    let channel_name_upper = channel_name.to_ascii_uppercase();
+    starts_with_ignore_ascii_case(channel_name, "GPU")
+        || starts_with_ignore_ascii_case(channel_name, "ANE")
+        || contains_ignore_ascii_case(subgroup, "GPU")
+        || contains_ignore_ascii_case(subgroup, "ANE")
+}
 
-    channel_name_upper.starts_with("GPU")
-        || channel_name_upper.starts_with("ANE")
-        || subgroup_upper.contains("GPU")
-        || subgroup_upper.contains("ANE")
+#[inline]
+fn starts_with_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    haystack.len() >= needle.len()
+        && haystack.as_bytes()[..needle.len()].eq_ignore_ascii_case(needle.as_bytes())
+}
+
+#[inline]
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let needle_bytes = needle.as_bytes();
+    let haystack_bytes = haystack.as_bytes();
+    if haystack_bytes.len() < needle_bytes.len() {
+        return false;
+    }
+    haystack_bytes
+        .windows(needle_bytes.len())
+        .any(|window| window.eq_ignore_ascii_case(needle_bytes))
 }
 
 struct CfString(CFStringRef);

@@ -29,13 +29,14 @@ use std::ffi::{CStr, c_uint, c_ulonglong};
 use std::mem::MaybeUninit;
 use std::os::raw::{c_char, c_int, c_void};
 use std::sync::Once;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, anyhow, bail};
 use log::{debug, warn};
 
 use crate::core::{
-    AmalgafyRegistry, EnergyProvider, PidEnergyAttribution, PowerSnapshot,
+    AmalgafyRegistry, EnergyProvider, HardwareIdentitySource, PidEnergyAttribution, PowerSnapshot,
     deterministic_attribution_uj, nvml_window_energy_uj,
 };
 
@@ -54,7 +55,7 @@ const NVML_DEVICE_SERIAL_BUFFER_SIZE: usize = 30;
 type NvmlDeviceT = *mut c_void;
 
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 struct NvmlProcessInfoV3 {
     pid: c_uint,
     used_gpu_memory: c_ulonglong,
@@ -65,19 +66,16 @@ struct NvmlProcessInfoV3 {
 #[link(name = "nvml")]
 unsafe extern "C" {
     fn nvmlInit_v2() -> c_int;
+    // `nvmlShutdown` is intentionally retained but unused: per
+    // `WindowsProvider::drop` the daemon's main() is responsible for the
+    // process-wide NVML shutdown. The symbol stays declared so a future
+    // integration point doesn't have to re-add the FFI declaration.
+    #[allow(dead_code)]
     fn nvmlShutdown() -> c_int;
     fn nvmlDeviceGetCount_v2(count: *mut c_uint) -> c_int;
     fn nvmlDeviceGetHandleByIndex_v2(index: c_uint, device: *mut NvmlDeviceT) -> c_int;
-    fn nvmlDeviceGetSerial(
-        device: NvmlDeviceT,
-        serial: *mut c_char,
-        length: c_uint,
-    ) -> c_int;
-    fn nvmlDeviceGetUUID(
-        device: NvmlDeviceT,
-        uuid: *mut c_char,
-        length: c_uint,
-    ) -> c_int;
+    fn nvmlDeviceGetSerial(device: NvmlDeviceT, serial: *mut c_char, length: c_uint) -> c_int;
+    fn nvmlDeviceGetUUID(device: NvmlDeviceT, uuid: *mut c_char, length: c_uint) -> c_int;
     fn nvmlDeviceGetPowerUsage(device: NvmlDeviceT, power_mw: *mut c_uint) -> c_int;
     fn nvmlDeviceGetComputeRunningProcesses_v3(
         device: NvmlDeviceT,
@@ -88,18 +86,16 @@ unsafe extern "C" {
 }
 
 static NVML_INIT: Once = Once::new();
-static mut NVML_INIT_RESULT: c_int = NVML_SUCCESS;
+static NVML_INIT_RESULT: AtomicI32 = AtomicI32::new(NVML_SUCCESS);
 
 fn ensure_nvml_initialized() -> Result<()> {
     NVML_INIT.call_once(|| {
         // SAFETY: nvmlInit_v2 is documented as safe to call multiple times in
         // the same process but we still gate it behind a Once.
-        unsafe {
-            NVML_INIT_RESULT = nvmlInit_v2();
-        }
+        let code = unsafe { nvmlInit_v2() };
+        NVML_INIT_RESULT.store(code, Ordering::SeqCst);
     });
-    // SAFETY: NVML_INIT_RESULT is only written inside the Once block above.
-    let result = unsafe { NVML_INIT_RESULT };
+    let result = NVML_INIT_RESULT.load(Ordering::SeqCst);
     if result != NVML_SUCCESS {
         bail!("nvmlInit_v2 failed: {}", nvml_error_string(result));
     }
@@ -150,6 +146,11 @@ struct GpuBusyState {
 #[derive(Debug)]
 pub struct WindowsProvider {
     hardware_signature: String,
+    /// Records which NVML probe actually produced [`Self::hardware_signature`].
+    /// Surfaced to the cross-platform [`HardwareIdentity`](crate::core::HardwareIdentity)
+    /// probe so seals can distinguish a serial-derived fingerprint from a
+    /// UUID-derived (or synthetic) fallback.
+    signature_source: HardwareIdentitySource,
     /// Index of the NVIDIA device this provider is bound to. Multi-GPU
     /// daemons spin up one provider per device.
     device_index: u32,
@@ -181,13 +182,23 @@ impl WindowsProvider {
         let code = unsafe { nvmlDeviceGetHandleByIndex_v2(device_index, &mut handle) };
         check_nvml(code, "nvmlDeviceGetHandleByIndex_v2")?;
 
-        let serial = read_nvml_serial(handle).unwrap_or_else(|err| {
-            warn!("nvmlDeviceGetSerial failed, falling back to UUID: {err}");
-            read_nvml_uuid(handle).unwrap_or_else(|_| format!("nvml-device-{device_index}"))
-        });
+        let (serial, signature_source) = match read_nvml_serial(handle) {
+            Ok(s) => (s, HardwareIdentitySource::WindowsNvmlSerial),
+            Err(err) => {
+                warn!("nvmlDeviceGetSerial failed, falling back to UUID: {err}");
+                match read_nvml_uuid(handle) {
+                    Ok(uuid) => (uuid, HardwareIdentitySource::WindowsNvmlUuid),
+                    Err(_) => (
+                        format!("nvml-device-{device_index}"),
+                        HardwareIdentitySource::Synthetic,
+                    ),
+                }
+            }
+        };
 
         Ok(Self {
             hardware_signature: serial,
+            signature_source,
             device_index,
             device_handle: handle,
             busy_state: GpuBusyState::default(),
@@ -214,6 +225,15 @@ impl WindowsProvider {
     #[must_use]
     pub fn hardware_signature_string(&self) -> String {
         self.hardware_signature.clone()
+    }
+
+    /// Identifier of which NVML probe (serial, UUID, synthetic) actually
+    /// produced [`Self::hardware_signature_string`]. Surfaced so the
+    /// cross-platform hardware-identity probe can label the source on the
+    /// sealed payload.
+    #[must_use]
+    pub fn signature_source(&self) -> HardwareIdentitySource {
+        self.signature_source
     }
 
     /// Read the GPU's instantaneous power draw in **milliwatts** —

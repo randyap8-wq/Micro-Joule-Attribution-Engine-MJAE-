@@ -81,13 +81,17 @@ impl AmalgafyRegistry {
 
     /// Read the cumulative attribution for `pid`, if any.
     ///
-    /// Uses `Relaxed` ordering because `SkipMap::get` already establishes the
-    /// happens-before relationship needed to see the entry; the per-PID
-    /// counter is monotonically increasing and never repurposed, so a
-    /// possibly-stale read is bounded by one missed `add_micro_joules` call.
+    /// Uses `Acquire` ordering so the load synchronises with the `AcqRel`
+    /// release store performed by [`add_micro_joules`]; the per-PID counter
+    /// is monotonically increasing and never repurposed, but a relaxed
+    /// load could observe a stale value indefinitely on weakly-ordered
+    /// architectures, which `Acquire` rules out at zero cost on x86_64 /
+    /// AArch64.
     #[must_use]
     pub fn get(&self, pid: u32) -> Option<u64> {
-        self.table.get(&pid).map(|entry| entry.value().load(Ordering::Relaxed))
+        self.table
+            .get(&pid)
+            .map(|entry| entry.value().load(Ordering::Acquire))
     }
 
     /// Remove a PID from the registry (e.g. when a process exits) and return
@@ -95,7 +99,7 @@ impl AmalgafyRegistry {
     pub fn remove(&self, pid: u32) -> Option<u64> {
         self.table
             .remove(&pid)
-            .map(|entry| entry.value().load(Ordering::Relaxed))
+            .map(|entry| entry.value().load(Ordering::Acquire))
     }
 
     /// Number of PIDs currently tracked.
@@ -119,7 +123,7 @@ impl AmalgafyRegistry {
     pub fn total_micro_joules(&self) -> u64 {
         let mut total: u64 = 0;
         for entry in self.table.iter() {
-            total = saturating_add_value(total, entry.value().load(Ordering::Relaxed));
+            total = saturating_add_value(total, entry.value().load(Ordering::Acquire));
         }
         total
     }
@@ -132,7 +136,7 @@ impl AmalgafyRegistry {
     pub fn snapshot(&self) -> Vec<(u32, u64)> {
         self.table
             .iter()
-            .map(|entry| (*entry.key(), entry.value().load(Ordering::Relaxed)))
+            .map(|entry| (*entry.key(), entry.value().load(Ordering::Acquire)))
             .collect()
     }
 }
@@ -271,10 +275,7 @@ mod tests {
 
         // The per-PID totals must sum exactly to THREADS*ITERATIONS: no
         // delta may be dropped during the cold-path race.
-        assert_eq!(
-            registry.total_micro_joules(),
-            (THREADS * ITERATIONS) as u64
-        );
+        assert_eq!(registry.total_micro_joules(), (THREADS * ITERATIONS) as u64);
         for i in 0..ITERATIONS {
             let pid = (i as u32) * 1_000 + 1;
             assert_eq!(registry.get(pid), Some(THREADS as u64));
