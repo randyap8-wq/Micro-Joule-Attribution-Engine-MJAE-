@@ -205,9 +205,7 @@ fn canonicalize_value(value: Value) -> Value {
             }
             Value::Object(canonical)
         }
-        Value::Array(items) => {
-            Value::Array(items.into_iter().map(canonicalize_value).collect())
-        }
+        Value::Array(items) => Value::Array(items.into_iter().map(canonicalize_value).collect()),
         other => other,
     }
 }
@@ -314,20 +312,10 @@ mod tests {
         reversed.reverse();
 
         let seal_a = signer
-            .seal(
-                forward,
-                "NV-H100-SXM5-SN-0001",
-                650,
-                fixture_identity(),
-            )
+            .seal(forward, "NV-H100-SXM5-SN-0001", 650, fixture_identity())
             .expect("seal should sign");
         let seal_b = signer
-            .seal(
-                reversed,
-                "NV-H100-SXM5-SN-0001",
-                650,
-                fixture_identity(),
-            )
+            .seal(reversed, "NV-H100-SXM5-SN-0001", 650, fixture_identity())
             .expect("seal should sign");
 
         assert_eq!(seal_a.payload.attributions, seal_b.payload.attributions);

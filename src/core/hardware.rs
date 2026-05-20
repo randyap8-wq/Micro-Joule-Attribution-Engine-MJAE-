@@ -9,7 +9,9 @@
 //!   `IOPlatformExpertDevice` registry entry.
 //! * **Linux** — `/etc/machine-id` (systemd-managed, stable across reboots),
 //!   with a sysfs GPU UUID fallback for diskless / immutable images.
-//! * **Windows** — the GPU UUID returned by `nvmlDeviceGetUUID`.
+//! * **Windows** — the NVML device serial returned by `nvmlDeviceGetSerial`,
+//!   with `nvmlDeviceGetUUID` as a fallback when the serial is unavailable
+//!   (e.g. on some consumer GPUs).
 //!
 //! All three paths return a non-empty UTF-8 string. The probe never panics
 //! on partial telemetry — it falls back to a process-stable synthetic ID and
@@ -55,8 +57,11 @@ pub enum HardwareIdentitySource {
     LinuxMachineId,
     /// Linux GPU UUID surfaced via `/sys/class/drm/*/device`.
     LinuxGpuUuid,
-    /// Windows NVML `nvmlDeviceGetUUID`.
+    /// Windows NVML `nvmlDeviceGetUUID` (used as a fallback when the device
+    /// serial is unavailable).
     WindowsNvmlUuid,
+    /// Windows NVML `nvmlDeviceGetSerial` (preferred Windows fingerprint).
+    WindowsNvmlSerial,
     /// Caller-supplied identity (tests, CI, hand-rolled daemons).
     Manual,
     /// No probe succeeded; the daemon synthesised a placeholder so the
@@ -98,7 +103,11 @@ impl HardwareIdentity {
             .or_else(|_| std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_owned()))
             .unwrap_or_else(|_| "unknown-host".to_owned());
         let host = host.trim();
-        let host = if host.is_empty() { "unknown-host" } else { host };
+        let host = if host.is_empty() {
+            "unknown-host"
+        } else {
+            host
+        };
         let pid = std::process::id();
         Self {
             fingerprint: format!("synthetic:{}:host={}:pid={}", reason.into(), host, pid),
@@ -112,8 +121,9 @@ impl HardwareIdentity {
     /// * On macOS we read `IOPlatformSerialNumber` via IOKit.
     /// * On Linux we read `/etc/machine-id`, falling back to the first
     ///   readable `uuid` attribute under `/sys/class/drm/`.
-    /// * On Windows we initialise NVML and read `nvmlDeviceGetUUID` for
-    ///   device 0 (multi-GPU daemons can probe other devices through
+    /// * On Windows we initialise NVML and read `nvmlDeviceGetSerial` for
+    ///   device 0, falling back to `nvmlDeviceGetUUID` (multi-GPU daemons
+    ///   can probe other devices through
     ///   [`HardwareIdentity::probe_windows_device`]).
     ///
     /// Any failure is logged and the function returns a synthetic identity
@@ -136,15 +146,15 @@ impl HardwareIdentity {
     pub fn try_probe() -> Result<Self> {
         #[cfg(target_os = "macos")]
         {
-            return macos::probe();
+            macos::probe()
         }
         #[cfg(target_os = "linux")]
         {
-            return linux::probe();
+            linux::probe()
         }
         #[cfg(target_os = "windows")]
         {
-            return windows::probe_device(0);
+            windows::probe_device(0)
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         {
@@ -153,7 +163,8 @@ impl HardwareIdentity {
     }
 
     /// Windows-specific helper: probe a *specific* NVIDIA device by index.
-    /// On non-Windows hosts this always returns an error.
+    /// Only available when compiled for Windows; on other targets the function
+    /// is not defined.
     #[cfg(target_os = "windows")]
     pub fn probe_windows_device(device_index: u32) -> Result<Self> {
         windows::probe_device(device_index)
@@ -185,15 +196,17 @@ mod linux {
                     source: HardwareIdentitySource::LinuxGpuUuid,
                 }),
                 Err(gpu_err) => {
-                    bail!("/etc/machine-id unreadable ({machine_err}) and no GPU UUID under /sys/class/drm/* ({gpu_err})")
+                    bail!(
+                        "/etc/machine-id unreadable ({machine_err}) and no GPU UUID under /sys/class/drm/* ({gpu_err})"
+                    )
                 }
             },
         }
     }
 
     fn read_machine_id() -> Result<String> {
-        let raw = fs::read_to_string("/etc/machine-id")
-            .context("failed to read /etc/machine-id")?;
+        let raw =
+            fs::read_to_string("/etc/machine-id").context("failed to read /etc/machine-id")?;
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             bail!("/etc/machine-id is empty");
@@ -248,10 +261,8 @@ mod macos {
     #[link(name = "IOKit", kind = "framework")]
     unsafe extern "C" {
         fn IOServiceMatching(name: *const c_char) -> *mut c_void;
-        fn IOServiceGetMatchingService(
-            master_port: u32,
-            matching: *mut c_void,
-        ) -> IoRegistryEntryT;
+        fn IOServiceGetMatchingService(master_port: u32, matching: *mut c_void)
+        -> IoRegistryEntryT;
         fn IORegistryEntryCreateCFProperty(
             entry: IoRegistryEntryT,
             key: CFStringRef,
@@ -309,9 +320,8 @@ mod macos {
         let key = CfString::new("IOPlatformSerialNumber")?;
         // SAFETY: `service` is a valid IORegistryEntry and `key.as_raw()` is a
         // valid CFStringRef for the duration of the call.
-        let property = unsafe {
-            IORegistryEntryCreateCFProperty(service, key.as_raw(), ptr::null(), 0)
-        };
+        let property =
+            unsafe { IORegistryEntryCreateCFProperty(service, key.as_raw(), ptr::null(), 0) };
 
         // Release the service handle as soon as we don't need it anymore.
         // SAFETY: `service` was vended by IOServiceGetMatchingService and is
@@ -397,19 +407,21 @@ mod macos {
 mod windows {
     use anyhow::Result;
 
-    use super::{HardwareIdentity, HardwareIdentitySource};
+    use super::HardwareIdentity;
     use crate::providers::WindowsProvider;
 
     pub(super) fn probe_device(device_index: u32) -> Result<HardwareIdentity> {
         // `WindowsProvider::new` exposes its hardware signature using the
         // provider's normal NVML probe order, which prefers the device serial
-        // and only falls back to the UUID. Reuse that path so there is exactly
-        // one NVML entry point in the crate, but label the source to match the
-        // actual value being surfaced to auditors.
+        // and only falls back to the UUID (and to a synthetic placeholder if
+        // both fail). Reuse that path so there is exactly one NVML entry
+        // point in the crate, and forward the *actual* source so the seal's
+        // identity correctly identifies serial-, UUID-, and synthetic-derived
+        // fingerprints.
         let provider = WindowsProvider::new(device_index)?;
         Ok(HardwareIdentity {
             fingerprint: provider.hardware_signature_string(),
-            source: HardwareIdentitySource::WindowsNvmlSerial,
+            source: provider.signature_source(),
         })
     }
 }

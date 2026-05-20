@@ -177,16 +177,19 @@ pub trait EnergyProvider {
                             "Heartbeat: sample_power_state failed on {}: {err}",
                             self.hardware_signature()
                         );
+                        // Drop the prior snapshot so the next successful tick
+                        // re-seeds instead of computing Δ across a long
+                        // skipped gap and dumping the entire backfill into a
+                        // single PID slice.
+                        previous_snapshot = None;
                         continue;
                     }
                 };
 
                 if let Some(prev) = previous_snapshot.as_ref() {
                     let dt_ns = snapshot.observed_at_ns.saturating_sub(prev.observed_at_ns);
-                    let burst_power_uw = baseline_burst_power_uw(
-                        snapshot.active_power_uw,
-                        snapshot.idle_power_uw,
-                    );
+                    let burst_power_uw =
+                        baseline_burst_power_uw(snapshot.active_power_uw, snapshot.idle_power_uw);
                     let delta_uj = window_energy_uj(burst_power_uw, dt_ns);
 
                     let pids = self.active_pids();
@@ -327,10 +330,7 @@ mod tests {
         // to, so this is independent of CI load — the spawned task is
         // scheduled and wakes precisely on each simulated 100 ms boundary.
         for _ in 0..5 {
-            tokio::time::advance(std::time::Duration::from_millis(
-                SAMPLING_LOOP_INTERVAL_MS,
-            ))
-            .await;
+            tokio::time::advance(std::time::Duration::from_millis(SAMPLING_LOOP_INTERVAL_MS)).await;
             tokio::task::yield_now().await;
         }
         handle.abort();
@@ -362,10 +362,7 @@ mod tests {
         });
 
         for _ in 0..3 {
-            tokio::time::advance(std::time::Duration::from_millis(
-                SAMPLING_LOOP_INTERVAL_MS,
-            ))
-            .await;
+            tokio::time::advance(std::time::Duration::from_millis(SAMPLING_LOOP_INTERVAL_MS)).await;
             tokio::task::yield_now().await;
         }
         handle.abort();

@@ -128,12 +128,8 @@ mod tests {
     fn deterministic_attribution_splits_burst_energy_by_accelerator_time() {
         // 8.5W - 3.0W = 5.5W burst. PID held the GPU for half of the busy
         // window, so it gets half of the burst energy.
-        let attributed = deterministic_attribution_uj(
-            8_500_000,
-            3_000_000,
-            1_000_000_000,
-            2_000_000_000,
-        );
+        let attributed =
+            deterministic_attribution_uj(8_500_000, 3_000_000, 1_000_000_000, 2_000_000_000);
         assert_eq!(attributed, 5_500_000);
     }
 
@@ -164,4 +160,3 @@ mod tests {
         assert_eq!(nvml_window_energy_uj(u64::MAX, u64::MAX), u64::MAX);
     }
 }
-

@@ -1,12 +1,11 @@
-#[cfg(target_os = "linux")]
-use std::marker::PhantomData;
+#![cfg(target_os = "linux")]
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::marker::PhantomData;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
-#[cfg(target_os = "linux")]
 use aya::programs::TracePoint;
 use log::{debug, warn};
 
@@ -77,7 +76,6 @@ pub struct LinuxProvider {
     /// Most recent RAPL `energy_uj` reading, used to compute power between
     /// successive `sample_power_state` calls.
     rapl_state: Option<RaplState>,
-    #[cfg(target_os = "linux")]
     tracepoint_marker: PhantomData<fn() -> TracePoint>,
 }
 
@@ -115,7 +113,6 @@ impl LinuxProvider {
             pending: Vec::new(),
             active_pids: BTreeMap::new(),
             rapl_state: None,
-            #[cfg(target_os = "linux")]
             tracepoint_marker: PhantomData,
         }
     }
@@ -231,9 +228,17 @@ impl LinuxProvider {
 
         let power_uw = if let Some(prev) = self.rapl_state {
             // Modular delta: handle the RAPL counter wrapping back to 0
-            // once it exceeds `max_energy_uj`.
+            // once it exceeds `max_energy_uj`. When `max_energy_uj` is
+            // `u64::MAX` (the no-sibling-file fallback) the wrap branch
+            // would itself overflow, so treat that case as "this counter
+            // does not wrap" and only take the forward delta.
             let delta_uj = if energy_uj >= prev.energy_uj {
                 energy_uj - prev.energy_uj
+            } else if max_energy_uj == u64::MAX {
+                // No wrap point known — a backwards counter under that
+                // condition is unrecoverable, so report zero rather than
+                // saturate to a fabricated giant delta.
+                0
             } else {
                 // Counter wrapped: (max - prev) + curr + 1.
                 let to_wrap = max_energy_uj.saturating_sub(prev.energy_uj);
@@ -397,7 +402,9 @@ mod tests {
         // And the attribution sits in the pending queue, ready to flow into
         // the registry on the next `sync_registry`.
         let registry = AmalgafyRegistry::new();
-        provider.sync_registry(&registry).expect("drain should succeed");
+        provider
+            .sync_registry(&registry)
+            .expect("drain should succeed");
         assert_eq!(registry.get(4242), Some(50_000_000));
     }
 

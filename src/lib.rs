@@ -15,4 +15,3 @@ pub use crate::providers::AppleSiliconProvider;
 pub use crate::providers::{DmaFenceEvent, LinuxProvider};
 #[cfg(target_os = "windows")]
 pub use crate::providers::{NvmlComputeProcess, WindowsProvider};
-

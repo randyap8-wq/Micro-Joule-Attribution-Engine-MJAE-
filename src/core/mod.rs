@@ -19,4 +19,3 @@ pub use registry::{AmalgafyRegistry, global_registry};
 pub use signer::{
     AMALGAFY_SEAL_INTERVAL_SECS, AmalgafySeal, AmalgafySealPayload, AmalgafySigner, canonical_json,
 };
-
