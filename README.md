@@ -1,8 +1,8 @@
 # Micro-Joule Attribution Engine (MJAE)
 
 MJAE is a cross-platform, headless systems daemon that builds a **Trust Layer**
-for AI energy auditing. It runs in heterogeneous data centers — Linux H100
-clusters, Windows Server farms, and macOS-based local dev — and turns raw
+for AI energy auditing. It runs in heterogeneous data centers, Linux H100
+clusters, Windows Server farms, and macOS-based local dev, and turns raw
 kernel-level telemetry into a **signed `AmalgafySeal`** that proves how many
 micro-joules each process actually burned and *on which physical machine*.
 
