@@ -349,4 +349,12 @@ loop runs without contention.
 
 ---
 
-Built by the Amalgafy team.
+<p align="center">
+  <a href="https://amalgafy.com">
+    <img src="https://raw.githubusercontent.com/randyap8-wq/Clean-Shot/main/public/amalgafy-icon.svg" alt="Amalgafy" width="200" />
+  </a>
+</p>
+
+<p align="center">
+  Built by the <a href="https://amalgafy.com"><strong>Amalgafy</strong></a> team.
+</p>
