@@ -10,6 +10,23 @@ micro-joules each process actually burned and *on which physical machine*.
 > 287 W of it because it saturated the 16-bit float units — and that this
 > measurement came from SoC die `XYZ`."
 
+## Table of Contents
+
+- [Capabilities](#capabilities)
+- [Architecture](#architecture)
+  - [The Unified Registry](#the-unified-registry)
+  - [The Differential Sampling Daemon](#the-differential-sampling-daemon)
+  - [Linux eBPF integration](#linux-ebpf-integration)
+  - [Hardware Identity & Audit-Spoof Resistance](#hardware-identity--audit-spoof-resistance)
+  - [Deterministic Attribution Model](#deterministic-attribution-model)
+  - [The Amalgafy Seal](#the-amalgafy-seal)
+  - [Per-Fence Correlation (Linux)](#per-fence-correlation-linux)
+  - [Apple Silicon idle-baseline calibration](#apple-silicon-idle-baseline-calibration)
+  - [Key management](#key-management)
+  - [Legacy `EnergyManifest`](#legacy-energymanifest)
+- [Crate layout](#crate-layout)
+- [Build & test](#build--test)
+
 ## Capabilities
 
 | Surface | Backend | Telemetry source |
@@ -329,3 +346,7 @@ The crate is **UI-free**, `log`-based, and designed to be embedded inside a
 `tokio` daemon. All hot paths use `u64` for µJ and `u64` for ns; the
 registry uses `AtomicU64` plus a lock-free `SkipMap` so the 100 ms heartbeat
 loop runs without contention.
+
+---
+
+Built by the Amalgafy team.
